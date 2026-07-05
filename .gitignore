@@ -1,0 +1,13 @@
+.gradle/
+build/
+out/
+bin/
+.idea/
+*.iml
+.DS_Store
+*.log
+
+# Internal dev tooling — not part of the published plugin
+.claude/
+.vscode/
+CLAUDE.md
