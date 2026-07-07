@@ -52,8 +52,10 @@ public interface BetterObjectHiderConfig extends Config
 		return 60;
 	}
 
+	// Name-based schema (v3). The old "groups" key held an ID-based format and is
+	// intentionally not read — a fresh install/schema, nothing shipped on the old one.
 	@ConfigItem(
-		keyName = "groups",
+		keyName = "groupsV2",
 		name = "",
 		description = "",
 		hidden = true

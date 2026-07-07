@@ -6,8 +6,11 @@
  */
 package com.betterobjecthider.ui;
 
+import com.betterobjecthider.AreaNames;
 import com.betterobjecthider.BetterObjectHiderPlugin;
+import com.betterobjecthider.HideEntry;
 import com.betterobjecthider.HideGroup;
+import com.betterobjecthider.HideScope;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -25,7 +28,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.function.Consumer;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -69,6 +71,15 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private static final ImageIcon CODE_HOVER;
 	private static final ImageIcon RENAME;
 	private static final ImageIcon RENAME_HOVER;
+
+	// Sort entries by object name, then reach (tile, area, global), then location
+	private static final Comparator<HideEntry> ENTRY_ORDER = Comparator
+		.comparing((HideEntry e) -> e.getObjectName().toLowerCase())
+		.thenComparingInt(e -> e.getScope().ordinal())
+		.thenComparingInt(HideEntry::getRegionId)
+		.thenComparingInt(HideEntry::getRegionX)
+		.thenComparingInt(HideEntry::getRegionY)
+		.thenComparingInt(HideEntry::getPlane);
 
 	// Local-JVM DnD flavor: the payload is passed as a live object, never serialized
 	private static final DataFlavor DRAG_FLAVOR = new DataFlavor(DragPayload.class, "Better Object Hider drag payload");
@@ -161,7 +172,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 		northPanel.add(buttons, BorderLayout.CENTER);
 
 		emptyPanel.setContent("No hidden objects",
-			"Shift+right-click a game object to hide it.");
+			"Shift+right-click a named object to hide it.");
 
 		final JPanel centerPanel = new JPanel(new BorderLayout());
 		centerPanel.add(listPanel, BorderLayout.NORTH);
@@ -188,7 +199,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 		int totalEntries = 0;
 		for (final HideGroup group : groups)
 		{
-			totalEntries += group.getIds().size() + group.getTiles().size() + group.getAreas().size();
+			totalEntries += group.getEntries().size();
 		}
 
 		// Fresh-install state: one pristine group and nothing hidden — show only
@@ -251,7 +262,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private JPanel buildGroupHeader(HideGroup group, boolean active, boolean expanded)
 	{
 		final String name = group.getName();
-		final int count = group.getIds().size() + group.getTiles().size() + group.getAreas().size();
+		final int count = group.getEntries().size();
 
 		// Two lines: full-width name (no truncation), then evenly-spaced controls
 		final JPanel header = new JPanel(new BorderLayout(0, 4));
@@ -301,8 +312,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 			? "Active group — new hides are added here. Click to collapse/expand."
 			: "Click to collapse/expand");
 
-		// The full-width name row is the collapse toggle; keeping it off the
-		// icon row prevents accidental toggles when clicking between icons
 		nameLabel.addMouseListener(new MouseAdapter()
 		{
 			@Override
@@ -317,7 +326,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 		controls.setOpaque(false);
 		controls.setLayout(new GridLayout(1, 0, 6, 0));
 
-		// Visibility toggle (an unchecked JCheckBox is nearly invisible on the dark theme)
 		final boolean enabled = group.isEnabled();
 		controls.add(iconLabel(
 			enabled ? EYE_OPEN : EYE_CLOSED,
@@ -347,7 +355,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		controls.add(iconLabel(EXPORT, EXPORT_HOVER, "Export group to clipboard", () ->
 		{
-			// Feedback arrives via game chat when logged in; dialog only as fallback
 			final String message = plugin.exportGroupToClipboard(name);
 			if (message != null)
 			{
@@ -361,8 +368,8 @@ public class BetterObjectHiderPanel extends PluginPanel
 		{
 			final int confirm = JOptionPane.showConfirmDialog(this,
 				isDefault
-					? "Clear all " + count + " entries from \"" + name + "\"?"
-					: "Delete group \"" + name + "\" and unhide its " + count + " entries?",
+					? "Clear all " + count + " objects from \"" + name + "\"?"
+					: "Delete group \"" + name + "\" and unhide its " + count + " objects?",
 				(isDefault ? "Clear" : "Delete") + " group", JOptionPane.OK_CANCEL_OPTION);
 			if (confirm == JOptionPane.OK_OPTION)
 			{
@@ -377,107 +384,19 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 	// --- group body --------------------------------------------------------------------
 
-	/** Sorts object IDs by resolved display name (users think in names, not IDs). */
-	private Comparator<Integer> byObjectName()
-	{
-		return Comparator
-			.<Integer, String>comparing(id -> plugin.getObjectName(id).toLowerCase())
-			.thenComparingInt(id -> id);
-	}
-
 	private List<JPanel> buildGroupRows(HideGroup group)
 	{
 		final List<JPanel> rows = new ArrayList<>();
 		final String groupName = group.getName();
 
-		// "Hide all of ID" entries
-		final List<Integer> sortedIds = new ArrayList<>(group.getIds());
-		sortedIds.sort(byObjectName());
-		for (final int objectId : sortedIds)
-		{
-			rows.add(buildRow(plugin.getObjectName(objectId), "All of ID " + objectId, 0, false,
-				() -> plugin.removeIdFromGroup(groupName, objectId),
-				target -> plugin.moveIdToGroup(groupName, target, objectId)));
-		}
+		final List<HideEntry> entries = new ArrayList<>(group.getEntries());
+		entries.sort(ENTRY_ORDER);
 
-		// Area-scoped entries ("hide all of ID in area")
-		final Map<Integer, List<String>> areasById = new TreeMap<>();
-		for (final String entry : group.getAreas())
+		for (final HideEntry entry : entries)
 		{
-			final int[] parts = BetterObjectHiderPlugin.parseAreaEntry(entry);
-			if (parts != null)
-			{
-				areasById.computeIfAbsent(parts[0], k -> new ArrayList<>()).add(entry);
-			}
-		}
-		final List<Integer> areaIds = new ArrayList<>(areasById.keySet());
-		areaIds.sort(byObjectName());
-		for (final int objectId : areaIds)
-		{
-			for (final String entry : areasById.get(objectId))
-			{
-				final int[] parts = BetterObjectHiderPlugin.parseAreaEntry(entry);
-				// Region ID → its south-west corner, a recognizable landmark coordinate
-				final int rx = (parts[1] >>> 8) << 6;
-				final int ry = (parts[1] & 0xff) << 6;
-				final ScopeBadge scope = scopeBadgeForEntry(entry);
-				rows.add(buildRow(plugin.getObjectName(objectId),
-					"Area near " + rx + ", " + ry + " (ID " + objectId + ")", 0, false, scope,
-					() -> plugin.removeAreaFromGroup(groupName, entry),
-					target -> plugin.moveAreaToGroup(groupName, target, entry)));
-			}
-		}
-
-		// Tile entries, collapsed per object ID
-		final Map<Integer, List<String>> byId = new TreeMap<>();
-		for (final String entry : group.getTiles())
-		{
-			final int[] parts = BetterObjectHiderPlugin.parseTileEntry(entry);
-			if (parts != null)
-			{
-				byId.computeIfAbsent(parts[0], k -> new ArrayList<>()).add(entry);
-			}
-		}
-		final List<Integer> tileIds = new ArrayList<>(byId.keySet());
-		tileIds.sort(byObjectName());
-		for (final int objectId : tileIds)
-		{
-			final List<String> entries = byId.get(objectId);
-			entries.sort(null);
-
-			if (entries.size() == 1)
-			{
-				final String entry = entries.get(0);
-				rows.add(buildRow(plugin.getObjectName(objectId),
-					tileDetail(entry) + " (ID " + objectId + ")", 0, false, scopeBadgeForEntry(entry),
-					() -> plugin.removeTileFromGroup(groupName, entry),
-					target -> plugin.moveTileToGroup(groupName, target, entry)));
-				continue;
-			}
-
-			// Same-type sub-header with a confirmed remove-all, then the individual tiles
-			final int count = entries.size();
-			final String objectName = plugin.getObjectName(objectId);
-			rows.add(buildRow(objectName + " ×" + count,
-				"ID " + objectId + " — remove all", 0, false, scopeBadgeForEntries(entries),
-				() ->
-				{
-					// Bulk unhide has no undo; one confirm is worth it (single ✕ stays instant)
-					final int confirm = JOptionPane.showConfirmDialog(this,
-						"Unhide all " + count + " hidden \"" + objectName + "\" in \"" + groupName + "\"?",
-						"Unhide all", JOptionPane.OK_CANCEL_OPTION);
-					if (confirm == JOptionPane.OK_OPTION)
-					{
-						plugin.removeTilesOfIdFromGroup(groupName, objectId);
-					}
-				},
-				target -> plugin.moveTilesOfIdToGroup(groupName, target, objectId)));
-			for (final String entry : entries)
-			{
-				rows.add(buildRow(tileDetail(entry), null, 12, true, scopeBadgeForEntry(entry),
-					() -> plugin.removeTileFromGroup(groupName, entry),
-					target -> plugin.moveTileToGroup(groupName, target, entry)));
-			}
+			rows.add(buildRow(entry.getObjectName(), detailFor(entry), entry.isInstance(),
+				() -> plugin.removeEntry(groupName, entry),
+				target -> plugin.moveEntry(groupName, target, entry)));
 		}
 
 		if (rows.isEmpty())
@@ -494,67 +413,41 @@ public class BetterObjectHiderPanel extends PluginPanel
 		return rows;
 	}
 
-	private static String tileDetail(String entry)
+	private static String detailFor(HideEntry entry)
 	{
-		final int[] parts = BetterObjectHiderPlugin.parseTileEntry(entry);
-		if (parts == null)
+		if (entry.getScope() == HideScope.GLOBAL)
 		{
-			return entry;
+			return "Everywhere";
 		}
-		final WorldPoint wp = WorldPoint.fromRegion(parts[1], parts[2], parts[3], parts[4]);
-		final StringBuilder sb = new StringBuilder("Tile ")
-			.append(wp.getX()).append(", ").append(wp.getY());
-		if (parts[4] != 0)
+		// Prefer a readable place name (e.g. "Tzhaar Fight Caves"); this also
+		// names instances correctly since entries store the template region.
+		final String area = AreaNames.get(entry.getRegionId());
+		if (entry.getScope() == HideScope.AREA)
 		{
-			sb.append(", plane ").append(parts[4]);
+			if (area != null)
+			{
+				return "All of " + area;
+			}
+			// Region ID → its south-west corner, a recognizable landmark coordinate
+			final int rx = (entry.getRegionId() >>> 8) << 6;
+			final int ry = (entry.getRegionId() & 0xff) << 6;
+			return "This whole area (near " + rx + ", " + ry + ")";
+		}
+		if (area != null)
+		{
+			return area;
+		}
+		final WorldPoint wp = WorldPoint.fromRegion(
+			entry.getRegionId(), entry.getRegionX(), entry.getRegionY(), entry.getPlane());
+		final StringBuilder sb = new StringBuilder("Tile ").append(wp.getX()).append(", ").append(wp.getY());
+		if (entry.getPlane() != 0)
+		{
+			sb.append(", plane ").append(entry.getPlane());
 		}
 		return sb.toString();
 	}
 
 	// --- drag and drop -------------------------------------------------------------------
-
-	private enum ScopeBadge
-	{
-		NONE("", ""),
-		INSTANCE("Instance", "Instance-scoped hide — applies only inside instanced areas using this map template"),
-		MIXED("Mixed", "This stack contains both instance-scoped and overworld hides; expand it to inspect each tile");
-
-		private final String text;
-		private final String tooltip;
-
-		ScopeBadge(String text, String tooltip)
-		{
-			this.text = text;
-			this.tooltip = tooltip;
-		}
-	}
-
-	private static ScopeBadge scopeBadgeForEntry(String entry)
-	{
-		return BetterObjectHiderPlugin.isInstanceEntry(entry) ? ScopeBadge.INSTANCE : ScopeBadge.NONE;
-	}
-
-	private static ScopeBadge scopeBadgeForEntries(List<String> entries)
-	{
-		boolean hasInstance = false;
-		boolean hasOverworld = false;
-		for (String entry : entries)
-		{
-			if (BetterObjectHiderPlugin.isInstanceEntry(entry))
-			{
-				hasInstance = true;
-			}
-			else
-			{
-				hasOverworld = true;
-			}
-		}
-		if (hasInstance && hasOverworld)
-		{
-			return ScopeBadge.MIXED;
-		}
-		return hasInstance ? ScopeBadge.INSTANCE : ScopeBadge.NONE;
-	}
 
 	private static final class DragPayload
 	{
@@ -617,17 +510,10 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 	// --- widgets -------------------------------------------------------------------------
 
-	private JPanel buildRow(String name, String detail, int indent, boolean subRow,
-		Runnable onRemove, Consumer<String> moveToGroup)
-	{
-		return buildRow(name, detail, indent, subRow, ScopeBadge.NONE, onRemove, moveToGroup);
-	}
-
-	private JPanel buildRow(String name, String detail, int indent, boolean subRow, ScopeBadge scopeBadge,
-		Runnable onRemove, Consumer<String> moveToGroup)
+	private JPanel buildRow(String name, String detail, boolean instance, Runnable onRemove, Consumer<String> moveToGroup)
 	{
 		final JPanel row = new JPanel(new BorderLayout());
-		row.setBorder(new EmptyBorder(4, 8 + indent, 4, 8));
+		row.setBorder(new EmptyBorder(4, 8, 4, 8));
 		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		row.setToolTipText("Drag onto a group header to move");
 
@@ -636,26 +522,18 @@ public class BetterObjectHiderPanel extends PluginPanel
 		text.setOpaque(false);
 
 		final JLabel nameLabel = new JLabel(name);
-		if (subRow)
-		{
-			// Sub-rows under a ×N stack: visually subordinate to primary rows
-			nameLabel.setFont(FontManager.getRunescapeSmallFont());
-			nameLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		}
-		else
-		{
-			nameLabel.setForeground(Color.WHITE);
-		}
+		nameLabel.putClientProperty("html.disable", Boolean.TRUE);
+		nameLabel.setForeground(Color.WHITE);
 
 		final JPanel nameLine = new JPanel();
 		nameLine.setLayout(new BoxLayout(nameLine, BoxLayout.X_AXIS));
 		nameLine.setOpaque(false);
 		nameLine.setAlignmentX(LEFT_ALIGNMENT);
 		nameLine.add(nameLabel);
-		if (scopeBadge != ScopeBadge.NONE)
+		if (instance)
 		{
 			nameLine.add(Box.createRigidArea(new Dimension(6, 0)));
-			nameLine.add(scopeBadgeLabel(scopeBadge));
+			nameLine.add(instanceBadge());
 		}
 		text.add(nameLine);
 
@@ -691,7 +569,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 			@Override
 			protected void exportDone(JComponent source, Transferable data, int action)
 			{
-				// Runs whether the drop landed or was cancelled
 				highlightHeader(null);
 			}
 		});
@@ -700,24 +577,21 @@ public class BetterObjectHiderPanel extends PluginPanel
 			@Override
 			public void mouseDragged(MouseEvent e)
 			{
-				// No-op if a drag is already in progress
 				row.getTransferHandler().exportAsDrag(row, e, TransferHandler.MOVE);
 			}
 		});
 		return row;
 	}
 
-	private static JLabel scopeBadgeLabel(ScopeBadge scopeBadge)
+	private static JLabel instanceBadge()
 	{
-		final JLabel label = new JLabel(scopeBadge.text);
+		final JLabel label = new JLabel("Instance");
 		label.setOpaque(true);
 		label.setFont(FontManager.getRunescapeSmallFont());
-		label.setForeground(scopeBadge == ScopeBadge.INSTANCE ? Color.BLACK : Color.WHITE);
-		label.setBackground(scopeBadge == ScopeBadge.INSTANCE
-			? ColorScheme.BRAND_ORANGE
-			: ColorScheme.MEDIUM_GRAY_COLOR);
+		label.setForeground(Color.BLACK);
+		label.setBackground(ColorScheme.BRAND_ORANGE);
 		label.setBorder(new EmptyBorder(1, 4, 1, 4));
-		label.setToolTipText(scopeBadge.tooltip);
+		label.setToolTipText("Made inside an instance — applies only in instanced areas using this map template");
 		return label;
 	}
 

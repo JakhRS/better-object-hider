@@ -7,6 +7,11 @@
  * Inspired by LuxOG's custom-object-hider (BSD-2-Clause).
  * This plugin is purely cosmetic: it changes only what is rendered
  * client-side. It sends nothing to the server and automates nothing.
+ *
+ * Objects are hidden by their in-game NAME plus a map location — never by
+ * object ID. You point at a named object you can see and hide that object at
+ * that spot; objects with no name cannot be hidden. No IDs are entered,
+ * stored, or targeted.
  */
 package com.betterobjecthider;
 
@@ -22,12 +27,9 @@ import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.inject.Inject;
@@ -68,8 +70,8 @@ import net.runelite.client.util.ImageUtil;
 @Slf4j
 @PluginDescriptor(
 	name = "Better Object Hider",
-	description = "Hide individual game objects on specific tiles, or all objects sharing an ID, organized into shareable groups",
-	tags = {"hide", "object", "declutter", "qol", "group"}
+	description = "Hide specific named scenery objects by name and location, organized into shareable groups",
+	tags = {"hide", "object", "scenery", "declutter", "qol"}
 )
 public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 {
@@ -77,20 +79,24 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	public static final String DEFAULT_GROUP_NAME = "Default";
 	static final int MAX_GROUP_NAME_LENGTH = 40;
 
-	// Options are color-coded by scope as a traffic-light ladder: green for the
-	// flagship single-object hide (the safest and most-used option, so it gets
-	// the most identifiable color), yellow for one map area, red for everywhere.
-	// Unhide options mirror the same ladder.
-	private static final String HIDE_ONE = "<col=00ff7f>Hide this one</col>";
-	private static final String HIDE_AREA = "<col=ffd166>Hide all of ID in area</col>";
-	private static final String HIDE_ID = "<col=ff6b6b>Hide all of ID</col>";
-	private static final String UNHIDE_ONE = "<col=00ff7f>Unhide this one</col>";
-	private static final String UNHIDE_AREA = "<col=ffd166>Unhide all of ID in area</col>";
-	private static final String UNHIDE_ID = "<col=ff6b6b>Unhide all of ID</col>";
+	private static final String GROUPS_KEY = "groupsV2";
+	private static final String ACTIVE_KEY = "activeGroup";
+	private static final String LAST_USE_KEY = "activeGroupLastUse";
 
-	// Hiding these would suppress boss mechanics (RULES.md: "Sotetseg maze reveal"
-	// is explicitly prohibited); same list as LuxOG's custom-object-hider.
-	private static final Set<Integer> BANNED_OBJECTS = Set.of(
+	// Colour-coded by reach (a traffic-light ladder): green = this one tile,
+	// amber = this map area, red = everywhere. Every option is by object name.
+	private static final String HIDE_ONE = "<col=00ff7f>Hide this</col>";
+	private static final String HIDE_AREA = "<col=ffd166>Hide all in this area</col>";
+	private static final String HIDE_ALL = "<col=ff6b6b>Hide all everywhere</col>";
+	private static final String UNHIDE_ONE = "<col=00ff7f>Unhide this</col>";
+	private static final String UNHIDE_AREA = "<col=ffd166>Unhide all in this area</col>";
+	private static final String UNHIDE_ALL = "<col=ff6b6b>Unhide all everywhere</col>";
+
+	// Objects whose names we refuse to hide even when named — raid mechanic
+	// objects (RULES.md: "Sotetseg maze reveal" is prohibited). Resolved to
+	// names on startup; unnamed mechanic objects are already blocked by the
+	// named-only rule, making this belt-and-suspenders.
+	private static final Set<Integer> BANNED_OBJECT_IDS = Set.of(
 		ObjectID.TOB_BLOAT_PILLAR,
 		ObjectID.TOB_BLOAT_CHAMBER,
 		ObjectID.TOB_SOTETSEG_PLAINTILE,
@@ -132,26 +138,22 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	@Inject
 	private Gson gson;
 
-	// Persisted model. Mutated only inside synchronized(this) blocks — mutations
-	// arrive from both the client thread (menu clicks) and the EDT (panel buttons).
+	// Persisted model. Mutated only inside synchronized(this) — mutations arrive
+	// from both the client thread (menu clicks) and the EDT (panel buttons).
 	private final List<HideGroup> groups = new ArrayList<>();
 	private String activeGroupName = DEFAULT_GROUP_NAME;
 
-	// Derived effective state, the ONLY sets drawObject() reads. Concurrent:
-	// drawObject() is called from the maploader thread during scene upload.
-	private final Set<Integer> activeHiddenIds = ConcurrentHashMap.newKeySet();
-	// Scene-space "id:x:y:plane" lookup, recomputed per world view (never persisted)
-	private final Set<String> activeHiddenTilePoints = ConcurrentHashMap.newKeySet();
-	// Template-space "id:regionId" pairs from enabled groups (region hides need no
-	// re-projection — the object's template region is resolved at draw time)
-	private final Set<String> activeAreaPairs = ConcurrentHashMap.newKeySet();
-	// Object names resolved on the client thread, read by the panel on the EDT
-	private final Map<Integer, String> objectNames = new ConcurrentHashMap<>();
+	// Derived render state: scene-space "id:x:y:plane" positions of objects that
+	// should currently be suppressed. Names are resolved on the client thread
+	// (see rebuildHiddenPositions); drawObject on the maploader thread only does
+	// a cheap position lookup. Concurrent because drawObject reads it off-thread.
+	private final Set<String> hiddenPositions = ConcurrentHashMap.newKeySet();
+
+	// Names of banned mechanic objects, resolved once on the client thread.
+	private final Set<String> bannedNames = ConcurrentHashMap.newKeySet();
 
 	private BetterObjectHiderPanel pluginPanel;
 	private NavigationButton navigationButton;
-	private volatile Boolean lastTopLevelInstance;
-	private volatile boolean pendingSceneScopeRestore;
 
 	@Provides
 	BetterObjectHiderConfig provideConfig(ConfigManager configManager)
@@ -162,7 +164,6 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	@Override
 	protected void startUp()
 	{
-		migrateLegacyConfig();
 		loadFromConfig();
 		renderCallbackManager.register(this);
 
@@ -178,7 +179,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			.build();
 		clientToolbar.addNavigation(navigationButton);
 
-		clientThread.invokeLater(this::refresh);
+		clientThread.invokeLater(() ->
+		{
+			resolveBannedNames();
+			refresh();
+		});
 	}
 
 	@Override
@@ -189,26 +194,24 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		navigationButton = null;
 		pluginPanel = null;
 
-		// Capture what was hidden before clearing so we can restore those zones
-		final Set<Integer> ids = new HashSet<>(activeHiddenIds);
-		final Set<String> points = new HashSet<>(activeHiddenTilePoints);
-		final Set<String> areas = new HashSet<>(activeAreaPairs);
+		final Set<String> restore = new HashSet<>(hiddenPositions);
 		synchronized (this)
 		{
 			groups.clear();
 		}
-		activeHiddenIds.clear();
-		activeHiddenTilePoints.clear();
-		activeAreaPairs.clear();
-		clientThread.invokeLater(() -> invalidateZones(ids, points, areas, true));
+		hiddenPositions.clear();
+		bannedNames.clear();
+		// Re-upload the zones we were suppressing so the objects come back
+		clientThread.invokeLater(() -> invalidateZones(restore));
 	}
 
-	// --- RenderCallback ----------------------------------------------------------
+	// --- RenderCallback (maploader thread) -------------------------------------------
 
 	@Override
 	public boolean drawObject(Scene scene, TileObject object)
 	{
-		if (!isHidden(scene, object))
+		if (hiddenPositions.isEmpty()
+			|| !hiddenPositions.contains(tileKey(object.getId(), object.getWorldLocation())))
 		{
 			return true;
 		}
@@ -216,141 +219,15 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return config.revealAll();
 	}
 
-	private boolean isHidden(TileObject object)
-	{
-		return isHidden(sceneOf(object), object);
-	}
-
-	private boolean isHidden(Scene scene, TileObject object)
-	{
-		final int id = object.getId();
-		if (activeHiddenIds.contains(id))
-		{
-			return true;
-		}
-		return matchesTile(activeHiddenTilePoints, scene, object)
-			|| matchesArea(activeAreaPairs, scene, object);
-	}
-
-	/**
-	 * Render callbacks receive the scene currently being uploaded; during instance
-	 * transitions that is the safest source of scope. The object's world view can
-	 * briefly lag the upload, which is how Fight Caves template tiles were baked
-	 * into Mor Ul Rek until another hider plugin forced a rebuild.
-	 */
-	private static boolean matchesTile(Set<String> tilePoints, Scene scene, TileObject object)
-	{
-		return matchesTile(tilePoints, scene, object, false);
-	}
-
-	private static boolean matchesTile(Set<String> tilePoints, Scene scene, TileObject object, boolean ignoreScope)
-	{
-		return !tilePoints.isEmpty()
-			&& containsScopedEntry(tilePoints, tileKey(object.getId(), object.getWorldLocation()),
-				scopeIsInstance(scene, object), ignoreScope);
-	}
-
-	private static boolean matchesArea(Set<String> areaPairs, Scene scene, TileObject object)
-	{
-		return matchesArea(areaPairs, scene, object, false);
-	}
-
-	private static boolean matchesArea(Set<String> areaPairs, Scene scene, TileObject object, boolean ignoreScope)
-	{
-		if (areaPairs.isEmpty())
-		{
-			return false;
-		}
-		final int regionId = templateRegionOf(scene, object);
-		return regionId != -1
-			&& containsScopedEntry(areaPairs, areaKey(object.getId(), regionId),
-				scopeIsInstance(scene, object), ignoreScope);
-	}
-
-	static boolean containsScopedEntry(Set<String> entries, String baseEntry, boolean instanced, boolean ignoreScope)
-	{
-		if (entries.contains(scoped(baseEntry, instanced)))
-		{
-			return true;
-		}
-		return ignoreScope && entries.contains(scoped(baseEntry, !instanced));
-	}
-
-	/**
-	 * Resolves the map region (template space) an object belongs to. Safe on the
-	 * maploader thread: only field reads on the scene/object. Returns -1 when
-	 * the instance chunk has no template data.
-	 */
-	private static int templateRegionOf(TileObject object)
-	{
-		return templateRegionOf(sceneOf(object), object);
-	}
-
-	private static int templateRegionOf(Scene scene, TileObject object)
-	{
-		final WorldView wv = object.getWorldView();
-		final WorldPoint wp = object.getWorldLocation();
-		if (!scopeIsInstance(scene, object))
-		{
-			return wp.getRegionID();
-		}
-		if (scene == null && wv == null)
-		{
-			return -1;
-		}
-
-		final int[][][] chunks = scene == null ? wv.getInstanceTemplateChunks() : scene.getInstanceTemplateChunks();
-		final int baseX = scene == null ? wv.getBaseX() : scene.getBaseX();
-		final int baseY = scene == null ? wv.getBaseY() : scene.getBaseY();
-		final int plane = wp.getPlane();
-		if (chunks == null)
-		{
-			return -1;
-		}
-		final int chunkX = (wp.getX() - baseX) >> 3;
-		final int chunkY = (wp.getY() - baseY) >> 3;
-		if (plane < 0 || plane >= chunks.length
-			|| chunkX < 0 || chunkX >= chunks[plane].length
-			|| chunkY < 0 || chunkY >= chunks[plane][chunkX].length)
-		{
-			return -1;
-		}
-		final int packed = chunks[plane][chunkX][chunkY];
-		if (packed == -1)
-		{
-			return -1;
-		}
-		// Same packing WorldPoint.fromLocalInstance decodes: template chunk
-		// coords in tile units; rotation is irrelevant at region granularity
-		final int templateTileY = (packed >> 3 & 2047) * 8;
-		final int templateTileX = (packed >> 14 & 1023) * 8;
-		return (templateTileX >> 6) << 8 | templateTileY >> 6;
-	}
-
-	private static Scene sceneOf(TileObject object)
-	{
-		final WorldView wv = object.getWorldView();
-		return wv == null ? null : wv.getScene();
-	}
-
-	private static boolean scopeIsInstance(Scene scene, TileObject object)
-	{
-		if (scene != null)
-		{
-			return scene.isInstance();
-		}
-		final WorldView wv = object.getWorldView();
-		return wv != null && wv.isInstance();
-	}
-
-	// --- lifecycle / sync ----------------------------------------------------------
+	// --- lifecycle / sync (client thread) --------------------------------------------
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged event)
 	{
 		if (event.getGameState() == GameState.LOADING)
 		{
-			clearSceneScopedState();
+			// Don't let a previous scene's positions suppress the incoming scene
+			hiddenPositions.clear();
 		}
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
@@ -362,8 +239,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	@Subscribe
 	public void onWorldViewLoaded(WorldViewLoaded event)
 	{
-		markPotentialScopeTransition(event.getWorldView());
-		// Entering/leaving an instance reloads the world view mid-session
+		// Fires when entering/leaving an instance or changing regions
 		refresh();
 	}
 
@@ -374,8 +250,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-
-		if ("activeGroup".equals(event.getKey()))
+		if (ACTIVE_KEY.equals(event.getKey()))
 		{
 			synchronized (this)
 			{
@@ -384,139 +259,98 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			rebuildPanel();
 			return;
 		}
-		if (!"groups".equals(event.getKey()) && !"revealAll".equals(event.getKey()))
+		if (!GROUPS_KEY.equals(event.getKey()) && !"revealAll".equals(event.getKey()))
 		{
 			return;
 		}
-
-		final Set<Integer> oldIds = new HashSet<>(activeHiddenIds);
 		loadFromConfig();
-		clientThread.invokeLater(() ->
-		{
-			oldIds.addAll(activeHiddenIds);
-			refreshWithIds(oldIds);
-		});
+		clientThread.invokeLater(this::refresh);
 	}
 
 	/**
-	 * Recomputes the derived tile set, invalidates affected GPU zones, resolves
-	 * object names, and rebuilds the panel. Must run on the client thread.
+	 * Recomputes which on-screen objects should be hidden (by resolving names on
+	 * the client thread), invalidates the affected GPU zones, and rebuilds the
+	 * panel. Must run on the client thread.
 	 */
 	private void refresh()
 	{
-		refreshWithIds(activeHiddenIds);
-	}
-
-	private void refreshWithIds(Set<Integer> idsToInvalidate)
-	{
-		// Union of old and new tile points / area pairs, captured around the
-		// rebuild, so both newly hidden and newly revealed objects get their
-		// zones re-uploaded. Both derived sets are (re)built in
-		// rebuildActiveTilePoints, so they must be snapshotted here — not
-		// passed in from onConfigChanged, where they are still stale.
-		final Set<String> points = new HashSet<>(activeHiddenTilePoints);
-		final Set<String> areas = new HashSet<>(activeAreaPairs);
-		final WorldView topView = client.getTopLevelWorldView();
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
-			// Mid-load: defer scene-scoped rebuild until the new scene is settled
-			clearSceneScopedState();
+			hiddenPositions.clear();
 			rebuildPanel();
 			return;
 		}
-
-		rebuildActiveTilePoints();
-		points.addAll(activeHiddenTilePoints);
-		areas.addAll(activeAreaPairs);
-		final boolean restoreUnscoped = consumeSceneScopeRestore(topView);
-		invalidateZones(idsToInvalidate, points, areas, restoreUnscoped);
-		resolveObjectNames();
+		final Set<String> union = new HashSet<>(hiddenPositions);
+		rebuildHiddenPositions();
+		union.addAll(hiddenPositions);
+		invalidateZones(union);
 		rebuildPanel();
 	}
 
-	private void clearSceneScopedState()
-	{
-		activeHiddenTilePoints.clear();
-		activeAreaPairs.clear();
-	}
-
-	private void markPotentialScopeTransition(WorldView wv)
-	{
-		if (wv == null || wv.getId() != WorldView.TOPLEVEL)
-		{
-			return;
-		}
-		final Boolean last = lastTopLevelInstance;
-		if (last != null && last != wv.isInstance())
-		{
-			pendingSceneScopeRestore = true;
-		}
-	}
-
-	private boolean consumeSceneScopeRestore(WorldView wv)
-	{
-		boolean scopeChanged = false;
-		if (wv != null)
-		{
-			final Boolean last = lastTopLevelInstance;
-			scopeChanged = last != null && last != wv.isInstance();
-			lastTopLevelInstance = wv.isInstance();
-		}
-		final boolean restore = pendingSceneScopeRestore || scopeChanged;
-		pendingSceneScopeRestore = false;
-		return restore;
-	}
-
 	/**
-	 * Re-projects the persisted region-relative entries of all enabled groups
-	 * into the current (possibly instanced) world view. The same template chunk
-	 * can occur more than once in a raid layout, so one entry may yield several
-	 * points.
+	 * Walks the loaded scene, resolves each object's name, and records the
+	 * positions of objects that match an enabled hide. This is where the
+	 * name → object resolution happens — on the client thread, never in
+	 * {@link #drawObject}. Cost is bounded to scene loads / hide changes, and
+	 * short-circuits when nothing is hidden.
 	 */
-	private void rebuildActiveTilePoints()
+	private void rebuildHiddenPositions()
 	{
-		activeHiddenTilePoints.clear();
-		activeAreaPairs.clear();
+		hiddenPositions.clear();
 
 		final WorldView wv = client.getTopLevelWorldView();
 		if (wv == null)
 		{
 			return;
 		}
-		final Set<String> tiles;
-		final Set<String> areas;
+		final Set<HideEntry> effective;
 		synchronized (this)
 		{
-			tiles = effectiveTiles(groups);
-			areas = effectiveAreas(groups);
+			effective = effectiveEntries(groups);
 		}
-		// Keys keep their scope tag; the scope is enforced per-object at draw time
-		// (see matchesTile / matchesArea), not by filtering here.
-		for (String entry : tiles)
+		if (effective.isEmpty())
 		{
-			final int[] parts = parseTileEntry(entry);
-			if (parts == null)
+			return;
+		}
+		final Set<String> names = entryNames(effective);
+
+		final Scene scene = wv.getScene();
+		for (Tile[][] plane : scene.getTiles())
+		{
+			if (plane == null)
 			{
 				continue;
 			}
-			final boolean instanced = isInstanceEntry(entry);
-			final WorldPoint wp = WorldPoint.fromRegion(parts[1], parts[2], parts[3], parts[4]);
-			for (WorldPoint occurrence : WorldPoint.toLocalInstance(wv, wp))
+			for (Tile[] column : plane)
 			{
-				activeHiddenTilePoints.add(scoped(tileKey(parts[0], occurrence), instanced));
-			}
-		}
-		for (String entry : areas)
-		{
-			final int[] parts = parseAreaEntry(entry);
-			if (parts != null)
-			{
-				activeAreaPairs.add(scoped(areaKey(parts[0], parts[1]), isInstanceEntry(entry)));
+				if (column == null)
+				{
+					continue;
+				}
+				for (Tile tile : column)
+				{
+					if (tile == null)
+					{
+						continue;
+					}
+					for (TileObject obj : tileObjects(tile))
+					{
+						final String name = resolveName(obj.getId());
+						if (name == null || !names.contains(name))
+						{
+							continue;
+						}
+						if (matchesAny(effective, obj, name))
+						{
+							hiddenPositions.add(tileKey(obj.getId(), obj.getWorldLocation()));
+						}
+					}
+				}
 			}
 		}
 	}
 
-	// --- menu ----------------------------------------------------------------------
+	// --- menu (client thread) --------------------------------------------------------
 
 	@Subscribe
 	public void onMenuOpened(MenuOpened event)
@@ -525,7 +359,6 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-
 		final WorldView wv = client.getTopLevelWorldView();
 		if (wv == null)
 		{
@@ -533,28 +366,22 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 		final Scene scene = wv.getScene();
 
-		// Attach our client-side options to object Examine entries. RUNELITE-typed
-		// entries are consumed by the client and never sent to the server.
-		final Set<Integer> coveredIds = new HashSet<>();
+		final Set<Integer> covered = new HashSet<>();
 		for (MenuEntry entry : event.getMenuEntries())
 		{
 			if (entry.getType() != MenuAction.EXAMINE_OBJECT)
 			{
 				continue;
 			}
-
-			final int objectId = entry.getIdentifier();
-			final TileObject obj = findTileObject(scene, wv.getPlane(), entry.getParam0(), entry.getParam1(), objectId);
-			if (obj == null)
+			final TileObject obj = findTileObject(scene, wv.getPlane(), entry.getParam0(), entry.getParam1(), entry.getIdentifier());
+			if (obj != null && covered.add(obj.getId()))
 			{
-				continue;
+				addMenuEntries(obj, entry.getTarget());
 			}
-			coveredIds.add(objectId);
-			addMenuEntries(obj, entry.getTarget());
 		}
 
-		// Wall/decorative/ground objects often lack an Examine entry — offer
-		// them via the hovered tile instead (same fallback as upstream).
+		// Wall/decorative/ground objects usually have no Examine entry — offer them
+		// via the hovered tile instead.
 		final Tile tile = wv.getSelectedSceneTile();
 		if (tile == null)
 		{
@@ -562,87 +389,165 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 		for (TileObject obj : tileObjects(tile))
 		{
-			final int objectId = obj.getId();
-			if (obj instanceof GameObject || !coveredIds.add(objectId))
+			if (obj instanceof GameObject || !covered.add(obj.getId()))
 			{
 				continue;
 			}
-			final String target = "<col=ffff>" + objectNames.computeIfAbsent(objectId, this::lookupName) + "</col>";
-			addMenuEntries(obj, target);
+			final String name = resolveName(obj.getId());
+			if (name != null)
+			{
+				addMenuEntries(obj, "<col=ffff>" + name + "</col>");
+			}
 		}
 	}
 
 	private void addMenuEntries(TileObject obj, String target)
 	{
-		final int objectId = obj.getId();
-
-		final int regionId = templateRegionOf(obj);
-		// Hides are scoped to where they're made: instance-made entries carry an
-		// ":i" tag and never affect the template's real-world location
-		final boolean instanced = scopeIsInstance(sceneOf(obj), obj);
-		final String areaEntry = regionId == -1 ? null : scoped(areaKey(objectId, regionId), instanced);
-
-		if (config.revealAll())
+		final String name = resolveName(obj.getId());
+		// The compliance gate: objects with no name simply cannot be hidden.
+		if (name == null || bannedNames.contains(name))
 		{
-			final String entry = scoped(regionKey(objectId, toTemplateWorldPoint(obj)), instanced);
-			if (isTileEntryHidden(entry))
-			{
-				client.getMenu().createMenuEntry(-1)
-					.setOption(UNHIDE_ONE)
-					.setTarget(target)
-					.setType(MenuAction.RUNELITE)
-					.onClick(e -> unhideTileEverywhere(entry));
-			}
-			if (areaEntry != null && activeAreaPairs.contains(areaEntry))
-			{
-				client.getMenu().createMenuEntry(-1)
-					.setOption(UNHIDE_AREA)
-					.setTarget(target)
-					.setType(MenuAction.RUNELITE)
-					.onClick(e -> unhideAreaEverywhere(areaEntry));
-			}
-			if (activeHiddenIds.contains(objectId))
-			{
-				client.getMenu().createMenuEntry(-1)
-					.setOption(UNHIDE_ID)
-					.setTarget(target)
-					.setType(MenuAction.RUNELITE)
-					.onClick(e -> unhideIdEverywhere(objectId));
-			}
 			return;
 		}
 
-		if (!isHidden(obj))
+		final HideEntry tileEntry = tileEntryFor(obj, name);
+		final HideEntry areaEntry = areaEntryFor(obj, name);
+		final HideEntry globalEntry = globalEntryFor(name);
+
+		if (config.revealAll())
 		{
-			client.getMenu().createMenuEntry(-1)
-				.setOption(HIDE_ONE)
-				.setTarget(target)
-				.setType(MenuAction.RUNELITE)
-				.onClick(e -> hideThisOne(obj));
+			// Narrowest reach first, so the closest-matching Unhide is on top
+			addUnhide(tileEntry, UNHIDE_ONE, target);
+			addUnhide(areaEntry, UNHIDE_AREA, target);
+			addUnhide(globalEntry, UNHIDE_ALL, target);
+			return;
 		}
-		if (areaEntry != null && !activeAreaPairs.contains(areaEntry))
+		addHideOption(tileEntry, HIDE_ONE, target);
+		addHideOption(areaEntry, HIDE_AREA, target);
+		addHideOption(globalEntry, HIDE_ALL, target);
+	}
+
+	private void addHideOption(HideEntry entry, String option, String target)
+	{
+		if (!anyGroupContains(entry))
 		{
 			client.getMenu().createMenuEntry(-1)
-				.setOption(HIDE_AREA)
+				.setOption(option)
 				.setTarget(target)
 				.setType(MenuAction.RUNELITE)
-				.onClick(e -> hideAllOfIdInArea(objectId, regionId, instanced));
-		}
-		if (!activeHiddenIds.contains(objectId))
-		{
-			client.getMenu().createMenuEntry(-1)
-				.setOption(HIDE_ID)
-				.setTarget(target)
-				.setType(MenuAction.RUNELITE)
-				.onClick(e -> hideAllOfId(objectId));
+				.onClick(e -> addHide(entry));
 		}
 	}
 
-	private synchronized boolean isTileEntryHidden(String entry)
+	private void addUnhide(HideEntry entry, String option, String target)
+	{
+		if (anyGroupContains(entry))
+		{
+			client.getMenu().createMenuEntry(-1)
+				.setOption(option)
+				.setTarget(target)
+				.setType(MenuAction.RUNELITE)
+				.onClick(e -> removeHideEverywhere(entry));
+		}
+	}
+
+	private HideEntry tileEntryFor(TileObject obj, String name)
+	{
+		final WorldPoint tp = toTemplateWorldPoint(obj);
+		final HideEntry e = new HideEntry();
+		e.setObjectName(name);
+		e.setScope(HideScope.TILE);
+		e.setRegionId(tp.getRegionID());
+		e.setRegionX(tp.getRegionX());
+		e.setRegionY(tp.getRegionY());
+		e.setPlane(tp.getPlane());
+		e.setInstance(obj.getWorldView().isInstance());
+		return e;
+	}
+
+	private HideEntry areaEntryFor(TileObject obj, String name)
+	{
+		final WorldPoint tp = toTemplateWorldPoint(obj);
+		final HideEntry e = new HideEntry();
+		e.setObjectName(name);
+		e.setScope(HideScope.AREA);
+		e.setRegionId(tp.getRegionID());
+		e.setInstance(obj.getWorldView().isInstance());
+		return e;
+	}
+
+	private static HideEntry globalEntryFor(String name)
+	{
+		final HideEntry e = new HideEntry();
+		e.setObjectName(name);
+		e.setScope(HideScope.GLOBAL);
+		return e;
+	}
+
+	// --- hide / unhide ---------------------------------------------------------------
+
+	private void addHide(HideEntry entry)
+	{
+		if (bannedNames.contains(entry.getObjectName()))
+		{
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+				"Hiding this object is disallowed due to plugin hub rules.", null);
+			return;
+		}
+		maybeExpireActiveGroup();
+		synchronized (this)
+		{
+			activeGroup().getEntries().add(entry);
+		}
+		touchActiveGroup();
+		saveToConfig();
+	}
+
+	/** Reveal-mode / panel unhide: removes the entry from every group so it reappears. */
+	public void removeHideEverywhere(HideEntry entry)
+	{
+		synchronized (this)
+		{
+			for (HideGroup group : groups)
+			{
+				group.getEntries().remove(entry);
+			}
+		}
+		saveToConfig();
+	}
+
+	public void removeEntry(String groupName, HideEntry entry)
+	{
+		synchronized (this)
+		{
+			final HideGroup group = findGroup(groups, groupName);
+			if (group != null)
+			{
+				group.getEntries().remove(entry);
+			}
+		}
+		saveToConfig();
+	}
+
+	/** Drag-and-drop: moves an entry from one group to another. */
+	public void moveEntry(String fromGroup, String toGroup, HideEntry entry)
+	{
+		final boolean moved;
+		synchronized (this)
+		{
+			moved = moveEntry(groups, fromGroup, toGroup, entry);
+		}
+		if (moved)
+		{
+			saveToConfig();
+		}
+	}
+
+	private synchronized boolean anyGroupContains(HideEntry entry)
 	{
 		for (HideGroup group : groups)
 		{
-			if (group.isEnabled() && group.getTiles().contains(entry))
+			if (group.getEntries().contains(entry))
 			{
 				return true;
 			}
@@ -650,130 +555,62 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return false;
 	}
 
-	// --- hide/unhide operations ------------------------------------------------------
+	// --- name resolution (client thread only) ----------------------------------------
 
-	private void hideThisOne(TileObject obj)
+	/**
+	 * The object's in-game name, impostor-unwrapped, or {@code null} when the
+	 * object has no usable name (the game's {@code "null"} sentinel, empty, or an
+	 * undefined composition). Client-thread only — {@code getObjectDefinition} is
+	 * not safe off it.
+	 */
+	private String resolveName(int objectId)
 	{
-		if (rejectIfBanned(obj.getId()))
+		ObjectComposition comp = client.getObjectDefinition(objectId);
+		if (comp == null)
 		{
-			return;
+			return null;
 		}
-		maybeExpireActiveGroup();
-		final String entry = scoped(regionKey(obj.getId(), toTemplateWorldPoint(obj)),
-			scopeIsInstance(sceneOf(obj), obj));
-		synchronized (this)
+		if (comp.getImpostorIds() != null)
 		{
-			activeGroup().getTiles().add(entry);
-		}
-		objectNames.computeIfAbsent(obj.getId(), this::lookupName);
-		touchActiveGroup();
-		saveToConfig();
-	}
-
-	private void hideAllOfId(int objectId)
-	{
-		if (rejectIfBanned(objectId))
-		{
-			return;
-		}
-		maybeExpireActiveGroup();
-		synchronized (this)
-		{
-			activeGroup().getIds().add(objectId);
-		}
-		objectNames.computeIfAbsent(objectId, this::lookupName);
-		touchActiveGroup();
-		saveToConfig();
-	}
-
-	private void hideAllOfIdInArea(int objectId, int regionId, boolean instanced)
-	{
-		if (rejectIfBanned(objectId))
-		{
-			return;
-		}
-		maybeExpireActiveGroup();
-		synchronized (this)
-		{
-			activeGroup().getAreas().add(scoped(areaKey(objectId, regionId), instanced));
-		}
-		objectNames.computeIfAbsent(objectId, this::lookupName);
-		touchActiveGroup();
-		saveToConfig();
-	}
-
-	/** Reveal-mode unhide: removes the area pair from every group, so it actually reappears. */
-	public void unhideAreaEverywhere(String entry)
-	{
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
+			final ObjectComposition impostor = comp.getImpostor();
+			if (impostor != null)
 			{
-				group.getAreas().remove(entry);
+				comp = impostor;
 			}
 		}
-		saveToConfig();
+		return cleanName(comp.getName());
 	}
 
-	/** Reveal-mode unhide: removes the entry from every group, so it actually reappears. */
-	public void unhideTileEverywhere(String entry)
+	/** Strips markup (defensive; game names are clean) and rejects the empty/"null" sentinels. */
+	static String cleanName(String rawName)
 	{
-		synchronized (this)
+		if (rawName == null)
 		{
-			for (HideGroup group : groups)
+			return null;
+		}
+		final String name = rawName.replaceAll("[<>]", "").trim();
+		return name.isEmpty() || "null".equals(name) ? null : name;
+	}
+
+	private void resolveBannedNames()
+	{
+		for (int id : BANNED_OBJECT_IDS)
+		{
+			final String name = resolveName(id);
+			if (name != null)
 			{
-				group.getTiles().remove(entry);
+				bannedNames.add(name);
 			}
 		}
-		saveToConfig();
 	}
 
-	/** Reveal-mode unhide: removes the ID from every group, so it actually reappears. */
-	public void unhideIdEverywhere(int objectId)
-	{
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
-			{
-				group.getIds().remove(objectId);
-			}
-		}
-		saveToConfig();
-	}
-
-	private boolean rejectIfBanned(int objectId)
-	{
-		if (!isBanned(objectId))
-		{
-			return false;
-		}
-		client.addChatMessage(
-			ChatMessageType.GAMEMESSAGE,
-			"",
-			"Hiding this object is disallowed due to plugin hub rules.",
-			null
-		);
-		return true;
-	}
-
-	static boolean isBanned(int objectId)
-	{
-		return BANNED_OBJECTS.contains(objectId);
-	}
-
-	// --- group management (called from the panel on the EDT and from menu clicks) -----
+	// --- group management ------------------------------------------------------------
 
 	/** The group new hides land in. Never null: invariants guarantee ≥1 group. */
 	private HideGroup activeGroup()
 	{
-		for (HideGroup group : groups)
-		{
-			if (group.getName().equals(activeGroupName))
-			{
-				return group;
-			}
-		}
-		return groups.get(0);
+		final HideGroup group = findGroup(groups, activeGroupName);
+		return group != null ? group : groups.get(0);
 	}
 
 	public void createGroup(String name)
@@ -798,9 +635,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 				final HideGroup def = findGroup(groups, DEFAULT_GROUP_NAME);
 				if (def != null)
 				{
-					def.getIds().clear();
-					def.getTiles().clear();
-					def.getAreas().clear();
+					def.getEntries().clear();
 				}
 			}
 			else
@@ -846,12 +681,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	{
 		synchronized (this)
 		{
-			for (HideGroup group : groups)
+			final HideGroup group = findGroup(groups, name);
+			if (group != null)
 			{
-				if (group.getName().equals(name))
-				{
-					group.setEnabled(enabled);
-				}
+				group.setEnabled(enabled);
 			}
 		}
 		saveToConfig();
@@ -864,151 +697,32 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			activeGroupName = name;
 		}
 		touchActiveGroup();
-		configManager.setConfiguration(CONFIG_GROUP, "activeGroup", name);
+		configManager.setConfiguration(CONFIG_GROUP, ACTIVE_KEY, name);
 	}
 
-	public void removeIdFromGroup(String groupName, int objectId)
+	/** Must be called inside synchronized(this). */
+	private void ensureInvariants()
 	{
-		synchronized (this)
+		ensureDefaultGroup(groups);
+		if (findGroup(groups, activeGroupName) == null)
 		{
-			for (HideGroup group : groups)
-			{
-				if (group.getName().equals(groupName))
-				{
-					group.getIds().remove(objectId);
-				}
-			}
-		}
-		saveToConfig();
-	}
-
-	public void removeTileFromGroup(String groupName, String entry)
-	{
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
-			{
-				if (group.getName().equals(groupName))
-				{
-					group.getTiles().remove(entry);
-				}
-			}
-		}
-		saveToConfig();
-	}
-
-	public void removeAreaFromGroup(String groupName, String entry)
-	{
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
-			{
-				if (group.getName().equals(groupName))
-				{
-					group.getAreas().remove(entry);
-				}
-			}
-		}
-		saveToConfig();
-	}
-
-	/** Drag-and-drop: moves an area-hide from one group to another. */
-	public void moveAreaToGroup(String fromGroup, String toGroup, String entry)
-	{
-		final boolean moved;
-		synchronized (this)
-		{
-			moved = moveArea(groups, fromGroup, toGroup, entry);
-		}
-		if (moved)
-		{
-			saveToConfig();
+			activeGroupName = groups.get(0).getName();
 		}
 	}
 
-	/** Removes every tile-hide of the given object ID from one group (the ×N remove-all). */
-	public void removeTilesOfIdFromGroup(String groupName, int objectId)
-	{
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
-			{
-				if (group.getName().equals(groupName))
-				{
-					final Iterator<String> it = group.getTiles().iterator();
-					while (it.hasNext())
-					{
-						final int[] parts = parseTileEntry(it.next());
-						if (parts != null && parts[0] == objectId)
-						{
-							it.remove();
-						}
-					}
-				}
-			}
-		}
-		saveToConfig();
-	}
-
-	/** Drag-and-drop: moves an ID-hide from one group to another. */
-	public void moveIdToGroup(String fromGroup, String toGroup, int objectId)
-	{
-		final boolean moved;
-		synchronized (this)
-		{
-			moved = moveId(groups, fromGroup, toGroup, objectId);
-		}
-		if (moved)
-		{
-			saveToConfig();
-		}
-	}
-
-	/** Drag-and-drop: moves a single tile-hide from one group to another. */
-	public void moveTileToGroup(String fromGroup, String toGroup, String entry)
-	{
-		final boolean moved;
-		synchronized (this)
-		{
-			moved = moveTile(groups, fromGroup, toGroup, entry);
-		}
-		if (moved)
-		{
-			saveToConfig();
-		}
-	}
-
-	/** Drag-and-drop: moves every tile-hide of an object ID from one group to another. */
-	public void moveTilesOfIdToGroup(String fromGroup, String toGroup, int objectId)
-	{
-		final boolean moved;
-		synchronized (this)
-		{
-			moved = moveTilesOfId(groups, fromGroup, toGroup, objectId);
-		}
-		if (moved)
-		{
-			saveToConfig();
-		}
-	}
-
-	// --- active-group idle timeout -------------------------------------------------------
-
-	private static final String LAST_USE_KEY = "activeGroupLastUse";
+	// --- active-group idle timeout ---------------------------------------------------
 
 	/**
 	 * If the active group hasn't been used within the configured timeout, new
-	 * hides revert to the Default group — a selection forgotten for days must
-	 * not silently collect stray hides. The timer refreshes on every hide and
-	 * every explicit active-group pick, so it never resets mid-project. Runs
-	 * on the client thread (login and hide-time), never mid-design.
+	 * hides revert to Default — a selection forgotten for days must not silently
+	 * collect stray hides. The timer refreshes on every hide and every explicit
+	 * active-group pick, so it never resets mid-project.
 	 */
 	private void maybeExpireActiveGroup()
 	{
 		final String raw = configManager.getConfiguration(CONFIG_GROUP, LAST_USE_KEY);
 		if (raw == null)
 		{
-			// First run: start the clock, never punish retroactively
 			touchActiveGroup();
 			return;
 		}
@@ -1016,7 +730,6 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-
 		final String target;
 		synchronized (this)
 		{
@@ -1029,7 +742,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			activeGroupName = target;
 		}
 		touchActiveGroup();
-		configManager.setConfiguration(CONFIG_GROUP, "activeGroup", target);
+		configManager.setConfiguration(CONFIG_GROUP, ACTIVE_KEY, target);
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
 			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
@@ -1061,36 +774,14 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	/** Where an expired selection falls back to: Default if it exists, else the first group. */
 	static String expiryTarget(List<HideGroup> groups)
 	{
-		for (HideGroup group : groups)
+		if (findGroup(groups, DEFAULT_GROUP_NAME) != null)
 		{
-			if (DEFAULT_GROUP_NAME.equals(group.getName()))
-			{
-				return DEFAULT_GROUP_NAME;
-			}
+			return DEFAULT_GROUP_NAME;
 		}
 		return groups.isEmpty() ? DEFAULT_GROUP_NAME : groups.get(0).getName();
 	}
 
-	/** Must be called inside synchronized(this). */
-	private void ensureInvariants()
-	{
-		ensureDefaultGroup(groups);
-		boolean activeExists = false;
-		for (HideGroup group : groups)
-		{
-			if (group.getName().equals(activeGroupName))
-			{
-				activeExists = true;
-				break;
-			}
-		}
-		if (!activeExists)
-		{
-			activeGroupName = groups.get(0).getName();
-		}
-	}
-
-	// --- import / export ---------------------------------------------------------------
+	// --- import / export -------------------------------------------------------------
 
 	/** Result of an import attempt, so the panel can style success vs. error dialogs. */
 	public static final class ImportResult
@@ -1111,9 +802,8 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	}
 
 	/**
-	 * Copies the group's JSON to the system clipboard. Feedback goes to the
-	 * game chat when logged in (routine action, no modal needed — same as
-	 * Ground Markers); otherwise the message is returned for a dialog.
+	 * Copies the group's JSON to the clipboard. Feedback goes to game chat when
+	 * logged in (like Ground Markers); otherwise the message is returned for a dialog.
 	 *
 	 * @return a message for the panel to show, or null if chat handled it
 	 */
@@ -1123,27 +813,17 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		final int count;
 		synchronized (this)
 		{
-			HideGroup found = null;
-			for (HideGroup group : groups)
-			{
-				if (group.getName().equals(groupName))
-				{
-					found = group;
-					break;
-				}
-			}
+			final HideGroup found = findGroup(groups, groupName);
 			if (found == null)
 			{
 				return "Group not found.";
 			}
-			count = found.getIds().size() + found.getTiles().size() + found.getAreas().size();
+			count = found.getEntries().size();
 			json = gson.toJson(found);
 		}
-		Toolkit.getDefaultToolkit()
-			.getSystemClipboard()
-			.setContents(new StringSelection(json), null);
+		Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(json), null);
 
-		final String message = "Copied \"" + groupName + "\" (" + count + " entries) to the clipboard.";
+		final String message = "Copied \"" + groupName + "\" (" + count + " objects) to the clipboard.";
 		if (client.getGameState() == GameState.LOGGED_IN)
 		{
 			clientThread.invokeLater(() ->
@@ -1153,19 +833,13 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return message;
 	}
 
-	/**
-	 * Imports a group from JSON on the system clipboard. Sanitizes defensively:
-	 * imported data is untrusted (nulls, garbage entries, banned IDs).
-	 */
+	/** Imports a group from clipboard JSON, sanitized defensively (imported data is untrusted). */
 	public ImportResult importGroupFromClipboard()
 	{
 		final String text;
 		try
 		{
-			text = Toolkit.getDefaultToolkit()
-				.getSystemClipboard()
-				.getData(DataFlavor.stringFlavor)
-				.toString();
+			text = Toolkit.getDefaultToolkit().getSystemClipboard().getData(DataFlavor.stringFlavor).toString();
 		}
 		catch (IOException | UnsupportedFlavorException ex)
 		{
@@ -1183,15 +857,14 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			return new ImportResult(false, "The clipboard does not contain a valid hide group.");
 		}
 
-		imported = sanitizeGroup(imported);
-		if (imported == null
-			|| (imported.getIds().isEmpty() && imported.getTiles().isEmpty() && imported.getAreas().isEmpty()))
+		imported = sanitizeGroup(imported, bannedNames);
+		if (imported == null || imported.getEntries().isEmpty())
 		{
 			return new ImportResult(false, "The clipboard does not contain a valid hide group.");
 		}
 
 		final String name;
-		final int count = imported.getIds().size() + imported.getTiles().size() + imported.getAreas().size();
+		final int count = imported.getEntries().size();
 		synchronized (this)
 		{
 			name = uniqueName(imported.getName(), existingNames(groups));
@@ -1199,60 +872,61 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			groups.add(imported);
 		}
 		saveToConfig();
-		return new ImportResult(true, "Imported \"" + name + "\" (" + count + " entries).");
+		return new ImportResult(true, "Imported \"" + name + "\" (" + count + " objects).");
 	}
 
-	// --- pure helpers (static, unit-tested) ----------------------------------------------
+	// --- pure helpers (static, unit-tested) ------------------------------------------
 
-	/** Union of hidden IDs over enabled groups. */
-	static Set<Integer> effectiveIds(Collection<HideGroup> groups)
+	/** Whether an object matches a specific entry: same name, then scope-appropriate location. */
+	static boolean matchesEntry(HideEntry e, String name, int regionId, int regionX, int regionY, int plane, boolean instance)
 	{
-		final Set<Integer> out = new HashSet<>();
+		if (!name.equals(e.getObjectName()))
+		{
+			return false;
+		}
+		switch (e.getScope())
+		{
+			case GLOBAL:
+				return true;
+			case AREA:
+				return e.isInstance() == instance && e.getRegionId() == regionId;
+			case TILE:
+			default:
+				return e.isInstance() == instance && e.getRegionId() == regionId
+					&& e.getRegionX() == regionX && e.getRegionY() == regionY && e.getPlane() == plane;
+		}
+	}
+
+	/** Union of entries over enabled groups. */
+	static Set<HideEntry> effectiveEntries(Collection<HideGroup> groups)
+	{
+		final Set<HideEntry> out = new HashSet<>();
 		for (HideGroup group : groups)
 		{
 			if (group.isEnabled())
 			{
-				out.addAll(group.getIds());
+				out.addAll(group.getEntries());
 			}
 		}
 		return out;
 	}
 
-	/** Union of tile entries over enabled groups. */
-	static Set<String> effectiveTiles(Collection<HideGroup> groups)
+	static Set<String> entryNames(Collection<HideEntry> entries)
 	{
 		final Set<String> out = new HashSet<>();
-		for (HideGroup group : groups)
+		for (HideEntry e : entries)
 		{
-			if (group.isEnabled())
-			{
-				out.addAll(group.getTiles());
-			}
-		}
-		return out;
-	}
-
-	/** Union of area entries over enabled groups. */
-	static Set<String> effectiveAreas(Collection<HideGroup> groups)
-	{
-		final Set<String> out = new HashSet<>();
-		for (HideGroup group : groups)
-		{
-			if (group.isEnabled())
-			{
-				out.addAll(group.getAreas());
-			}
+			out.add(e.getObjectName());
 		}
 		return out;
 	}
 
 	/**
-	 * Cleans an untrusted group (import or config): null-safe sets, valid entry
-	 * formats only, banned IDs dropped, sane name.
-	 *
-	 * @return the cleaned group, or null if the input was null
+	 * Cleans an untrusted group (import or config): sane group name, and only
+	 * entries with a real, non-banned object name. Rebuilds each entry so no
+	 * unexpected fields survive. {@code bannedNames} may be empty.
 	 */
-	static HideGroup sanitizeGroup(HideGroup group)
+	static HideGroup sanitizeGroup(HideGroup group, Set<String> bannedNames)
 	{
 		if (group == null)
 		{
@@ -1261,44 +935,29 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		final HideGroup out = new HideGroup();
 		out.setName(sanitizeName(group.getName()));
 		out.setEnabled(group.isEnabled());
-		if (group.getIds() != null)
+		if (group.getEntries() != null)
 		{
-			for (Integer id : group.getIds())
+			for (HideEntry e : group.getEntries())
 			{
-				if (id != null && id > 0 && !isBanned(id))
-				{
-					out.getIds().add(id);
-				}
-			}
-		}
-		if (group.getTiles() != null)
-		{
-			for (String tile : group.getTiles())
-			{
-				if (tile == null)
+				if (e == null)
 				{
 					continue;
 				}
-				final int[] parts = parseTileEntry(tile);
-				if (parts != null && !isBanned(parts[0]))
-				{
-					out.getTiles().add(tile);
-				}
-			}
-		}
-		if (group.getAreas() != null)
-		{
-			for (String area : group.getAreas())
-			{
-				if (area == null)
+				final String name = cleanName(e.getObjectName());
+				// scope == null means a pre-scope legacy record: drop it (clean break)
+				if (name == null || e.getScope() == null || bannedNames.contains(name) || e.getRegionId() < 0)
 				{
 					continue;
 				}
-				final int[] parts = parseAreaEntry(area);
-				if (parts != null && !isBanned(parts[0]))
-				{
-					out.getAreas().add(area);
-				}
+				final HideEntry clean = new HideEntry();
+				clean.setObjectName(name);
+				clean.setScope(e.getScope());
+				clean.setRegionId(e.getRegionId());
+				clean.setRegionX(e.getRegionX());
+				clean.setRegionY(e.getRegionY());
+				clean.setPlane(e.getPlane());
+				clean.setInstance(e.isInstance());
+				out.getEntries().add(clean);
 			}
 		}
 		return out;
@@ -1318,9 +977,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return DEFAULT_GROUP_NAME;
 		}
-		return trimmed.length() <= MAX_GROUP_NAME_LENGTH
-			? trimmed
-			: trimmed.substring(0, MAX_GROUP_NAME_LENGTH);
+		return trimmed.length() <= MAX_GROUP_NAME_LENGTH ? trimmed : trimmed.substring(0, MAX_GROUP_NAME_LENGTH);
 	}
 
 	/** Appends " (2)", " (3)", ... until the name is free. */
@@ -1352,8 +1009,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 
 	/**
 	 * The Default group always exists — the safeguard runs on every config load,
-	 * so a profile that lost it (older builds allowed deleting it, or a hand-edit)
-	 * self-heals at the next sync/login.
+	 * so a profile that lost it self-heals at the next sync/login.
 	 */
 	static void ensureDefaultGroup(List<HideGroup> groups)
 	{
@@ -1377,103 +1033,24 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return null;
 	}
 
-	/** @return true if the ID existed in the source group and was moved */
-	static boolean moveId(Collection<HideGroup> groups, String fromGroup, String toGroup, int objectId)
+	/** @return true if the entry existed in the source group and was moved */
+	static boolean moveEntry(Collection<HideGroup> groups, String fromGroup, String toGroup, HideEntry entry)
 	{
 		final HideGroup from = findGroup(groups, fromGroup);
 		final HideGroup to = findGroup(groups, toGroup);
-		if (from == null || to == null || from == to || !from.getIds().remove(objectId))
+		if (from == null || to == null || from == to || !from.getEntries().remove(entry))
 		{
 			return false;
 		}
-		to.getIds().add(objectId);
+		to.getEntries().add(entry);
 		return true;
-	}
-
-	/** @return true if the tile entry existed in the source group and was moved */
-	static boolean moveTile(Collection<HideGroup> groups, String fromGroup, String toGroup, String entry)
-	{
-		final HideGroup from = findGroup(groups, fromGroup);
-		final HideGroup to = findGroup(groups, toGroup);
-		if (from == null || to == null || from == to || !from.getTiles().remove(entry))
-		{
-			return false;
-		}
-		to.getTiles().add(entry);
-		return true;
-	}
-
-	/** @return true if the area entry existed in the source group and was moved */
-	static boolean moveArea(Collection<HideGroup> groups, String fromGroup, String toGroup, String entry)
-	{
-		final HideGroup from = findGroup(groups, fromGroup);
-		final HideGroup to = findGroup(groups, toGroup);
-		if (from == null || to == null || from == to || !from.getAreas().remove(entry))
-		{
-			return false;
-		}
-		to.getAreas().add(entry);
-		return true;
-	}
-
-	/** @return true if any tile-hide of the object ID was moved */
-	static boolean moveTilesOfId(Collection<HideGroup> groups, String fromGroup, String toGroup, int objectId)
-	{
-		final HideGroup from = findGroup(groups, fromGroup);
-		final HideGroup to = findGroup(groups, toGroup);
-		if (from == null || to == null || from == to)
-		{
-			return false;
-		}
-		boolean moved = false;
-		final Iterator<String> it = from.getTiles().iterator();
-		while (it.hasNext())
-		{
-			final String entry = it.next();
-			final int[] parts = parseTileEntry(entry);
-			if (parts != null && parts[0] == objectId)
-			{
-				it.remove();
-				to.getTiles().add(entry);
-				moved = true;
-			}
-		}
-		return moved;
-	}
-
-	/** Folds the pre-groups flat CSV config values into a single group. */
-	static HideGroup migrateLegacy(String idsCsv, String tilesCsv)
-	{
-		final HideGroup group = new HideGroup();
-		group.setName(DEFAULT_GROUP_NAME);
-		if (idsCsv != null && !idsCsv.isEmpty())
-		{
-			Arrays.stream(idsCsv.split(","))
-				.map(String::trim)
-				.filter(s -> s.matches("\\d+"))
-				.map(Integer::parseInt)
-				.filter(id -> !isBanned(id))
-				.forEach(group.getIds()::add);
-		}
-		if (tilesCsv != null && !tilesCsv.isEmpty())
-		{
-			Arrays.stream(tilesCsv.split("[,\\n]"))
-				.map(String::trim)
-				.filter(s ->
-				{
-					final int[] parts = parseTileEntry(s);
-					return parts != null && !isBanned(parts[0]);
-				})
-				.forEach(group.getTiles()::add);
-		}
-		return group;
 	}
 
 	/**
 	 * Parses the persisted groups JSON. A bad config value must never break
 	 * startUp(), so malformed input falls back to a single empty Default group.
 	 */
-	static List<HideGroup> parseGroups(Gson gson, String json)
+	static List<HideGroup> parseGroups(Gson gson, String json, Set<String> bannedNames)
 	{
 		List<HideGroup> parsed = null;
 		if (json != null && !json.isEmpty())
@@ -1496,7 +1073,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			final Set<String> names = new HashSet<>();
 			for (HideGroup group : parsed)
 			{
-				final HideGroup clean = sanitizeGroup(group);
+				final HideGroup clean = sanitizeGroup(group, bannedNames);
 				if (clean != null)
 				{
 					clean.setName(uniqueName(clean.getName(), names));
@@ -1514,13 +1091,28 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return out;
 	}
 
-	// --- coordinate keys -----------------------------------------------------------
+	// --- object / scene helpers ------------------------------------------------------
+
+	private boolean matchesAny(Set<HideEntry> effective, TileObject obj, String name)
+	{
+		final WorldPoint tp = toTemplateWorldPoint(obj);
+		final boolean instance = obj.getWorldView().isInstance();
+		for (HideEntry e : effective)
+		{
+			if (matchesEntry(e, name, tp.getRegionID(), tp.getRegionX(), tp.getRegionY(), tp.getPlane(), instance))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 
 	/**
-	 * De-instances the tile that {@link TileObject#getWorldLocation()} refers to.
-	 * Keyed off getWorldLocation (not getLocalLocation) so hide-time and draw-time
-	 * agree on the same tile for multi-tile objects, whose local center can round
-	 * to a different tile than the "center rounded south-west" world location.
+	 * De-instances the tile that {@link TileObject#getWorldLocation()} refers to,
+	 * so a hide made inside an instance stores a stable template location and
+	 * survives instance regeneration. Client-thread only. Keyed off
+	 * getWorldLocation (not getLocalLocation) so hide-time and match-time agree
+	 * for multi-tile objects.
 	 */
 	private WorldPoint toTemplateWorldPoint(TileObject obj)
 	{
@@ -1530,99 +1122,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return WorldPoint.fromLocalInstance(client, lp, wp.getPlane());
 	}
 
-	// Scene-space lookup key used by drawObject()
+	// Scene-space render-match key, in the object's world-location space
 	static String tileKey(int objectId, WorldPoint wp)
 	{
 		return objectId + ":" + wp.getX() + ":" + wp.getY() + ":" + wp.getPlane();
 	}
-
-	// Persisted, instance-stable key
-	static String regionKey(int objectId, WorldPoint templatePoint)
-	{
-		return objectId + ":" + templatePoint.getRegionID()
-			+ ":" + templatePoint.getRegionX()
-			+ ":" + templatePoint.getRegionY()
-			+ ":" + templatePoint.getPlane();
-	}
-
-	// Region-scoped hide key, template space
-	static String areaKey(int objectId, int regionId)
-	{
-		return objectId + ":" + regionId;
-	}
-
-	/**
-	 * Entries created inside an instance carry an ":i" suffix and apply only in
-	 * instances; unsuffixed entries apply only in the overworld. This keeps a
-	 * hide made in e.g. the Fight Caves from also hiding the template's
-	 * real-world map area right outside it.
-	 */
-	public static boolean isInstanceEntry(String entry)
-	{
-		return entry.endsWith(":i");
-	}
-
-	static String scoped(String entry, boolean instanced)
-	{
-		return instanced ? entry + ":i" : entry;
-	}
-
-	/**
-	 * Parses a persisted "id:regionId[:i]" area entry.
-	 *
-	 * @return {id, regionId}, or null if malformed
-	 */
-	public static int[] parseAreaEntry(String entry)
-	{
-		final String[] parts = entry.split(":");
-		if (parts.length != 2 && !(parts.length == 3 && "i".equals(parts[2])))
-		{
-			return null;
-		}
-		try
-		{
-			final int id = Integer.parseInt(parts[0]);
-			final int regionId = Integer.parseInt(parts[1]);
-			return (id <= 0 || regionId < 0) ? null : new int[]{id, regionId};
-		}
-		catch (NumberFormatException e)
-		{
-			return null;
-		}
-	}
-
-	/**
-	 * Parses a persisted "id:regionId:regionX:regionY:plane[:i]" entry.
-	 *
-	 * @return {id, regionId, regionX, regionY, plane}, or null if malformed
-	 */
-	public static int[] parseTileEntry(String entry)
-	{
-		final String[] parts = entry.split(":");
-		if (parts.length != 5 && !(parts.length == 6 && "i".equals(parts[5])))
-		{
-			return null;
-		}
-		final int[] out = new int[5];
-		for (int i = 0; i < 5; i++)
-		{
-			try
-			{
-				out[i] = Integer.parseInt(parts[i]);
-			}
-			catch (NumberFormatException e)
-			{
-				return null;
-			}
-			if (out[i] < 0)
-			{
-				return null;
-			}
-		}
-		return out;
-	}
-
-	// --- tile object lookup -----------------------------------------------------------
 
 	private static TileObject findTileObject(Scene scene, int plane, int sceneX, int sceneY, int objectId)
 	{
@@ -1677,24 +1181,17 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return out;
 	}
 
-	// --- GPU zone invalidation ---------------------------------------------------------
+	// --- GPU zone invalidation (client thread) ---------------------------------------
 
 	/**
-	 * Scans the scene for tile objects matching any of the given hides and
-	 * invalidates their zones so they re-upload with the current suppression
-	 * state. Only zones where a matching object is found are touched — those
-	 * are guaranteed initialized, avoiding the {@code assert zone.initialized}
-	 * crash. Must run on the client thread.
+	 * Invalidates the zones of every scene object whose position is in the given
+	 * set, so they re-upload with the current suppression state. Only zones where
+	 * a matching object is found are touched — those are guaranteed initialized,
+	 * avoiding the {@code assert zone.initialized} crash.
 	 */
-	private void invalidateZones(Set<Integer> ids, Set<String> tilePoints, Set<String> areaPairs)
+	private void invalidateZones(Set<String> positions)
 	{
-		invalidateZones(ids, tilePoints, areaPairs, false);
-	}
-
-	private void invalidateZones(Set<Integer> ids, Set<String> tilePoints, Set<String> areaPairs, boolean ignoreScope)
-	{
-		if ((ids.isEmpty() && tilePoints.isEmpty() && areaPairs.isEmpty())
-			|| client.getGameState() != GameState.LOGGED_IN)
+		if (positions.isEmpty() || client.getGameState() != GameState.LOGGED_IN)
 		{
 			return;
 		}
@@ -1704,7 +1201,6 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-
 		final Scene scene = wv.getScene();
 		final Set<Long> done = new HashSet<>();
 		for (Tile[][] plane : scene.getTiles())
@@ -1727,9 +1223,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 					}
 					for (TileObject obj : tileObjects(tile))
 					{
-						if (ids.contains(obj.getId())
-							|| matchesTile(tilePoints, scene, obj, ignoreScope)
-							|| matchesArea(areaPairs, scene, obj, ignoreScope))
+						if (positions.contains(tileKey(obj.getId(), obj.getWorldLocation())))
 						{
 							invalidateZoneForObject(scene, dc, obj, done);
 							break;
@@ -1746,7 +1240,6 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		final long hash = obj.getHash();
 		final int sceneX = (int) (hash & 127);
 		final int sceneY = (int) ((hash >> 7) & 127);
-		// Zone is 8 tiles; add ZONE_OFFSET for extended scene padding
 		final int zx = (sceneX >> 3) + ZONE_OFFSET;
 		final int zz = (sceneY >> 3) + ZONE_OFFSET;
 		final long key = ((long) zx << 32) | zz;
@@ -1756,76 +1249,9 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 	}
 
-	// --- object names --------------------------------------------------------------------
+	// --- panel accessors -------------------------------------------------------------
 
-	/** Resolves display names for all hidden entries. Must run on the client thread. */
-	private void resolveObjectNames()
-	{
-		if (client.getGameState() != GameState.LOGGED_IN)
-		{
-			return;
-		}
-		final Set<Integer> wanted = new HashSet<>();
-		synchronized (this)
-		{
-			for (HideGroup group : groups)
-			{
-				wanted.addAll(group.getIds());
-				for (String entry : group.getTiles())
-				{
-					final int[] parts = parseTileEntry(entry);
-					if (parts != null)
-					{
-						wanted.add(parts[0]);
-					}
-				}
-				for (String entry : group.getAreas())
-				{
-					final int[] parts = parseAreaEntry(entry);
-					if (parts != null)
-					{
-						wanted.add(parts[0]);
-					}
-				}
-			}
-		}
-		for (int id : wanted)
-		{
-			objectNames.computeIfAbsent(id, this::lookupName);
-		}
-	}
-
-	private String lookupName(int objectId)
-	{
-		ObjectComposition comp = client.getObjectDefinition(objectId);
-		if (comp != null && comp.getImpostorIds() != null)
-		{
-			final ObjectComposition impostor = comp.getImpostor();
-			if (impostor != null)
-			{
-				comp = impostor;
-			}
-		}
-		return displayName(comp == null ? null : comp.getName(), objectId);
-	}
-
-	static String displayName(String rawName, int objectId)
-	{
-		if (rawName == null || rawName.isEmpty() || "null".equals(rawName))
-		{
-			return "Object #" + objectId;
-		}
-		return rawName;
-	}
-
-	public String getObjectName(int objectId)
-	{
-		return objectNames.getOrDefault(objectId, "Object #" + objectId);
-	}
-
-	// --- panel accessors --------------------------------------------------------------------
-
-	/** Deep-copied snapshot for the EDT: safe to iterate while groups mutate. */
+	/** Deep-ish snapshot for the EDT: safe to iterate while groups mutate. */
 	public synchronized List<HideGroup> getGroupsSnapshot()
 	{
 		final List<HideGroup> out = new ArrayList<>(groups.size());
@@ -1834,9 +1260,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			final HideGroup copy = new HideGroup();
 			copy.setName(group.getName());
 			copy.setEnabled(group.isEnabled());
-			copy.getIds().addAll(group.getIds());
-			copy.getTiles().addAll(group.getTiles());
-			copy.getAreas().addAll(group.getAreas());
+			copy.getEntries().addAll(group.getEntries());
 			out.add(copy);
 		}
 		return out;
@@ -1856,46 +1280,18 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 	}
 
-	// --- config (de)serialization -------------------------------------------------
-
-	/** One-time: folds pre-groups flat hiddenIds/hiddenTiles config into a Default group. */
-	private void migrateLegacyConfig()
-	{
-		final String groupsJson = configManager.getConfiguration(CONFIG_GROUP, "groups");
-		if (groupsJson != null && !groupsJson.isEmpty())
-		{
-			return;
-		}
-		final String legacyIds = configManager.getConfiguration(CONFIG_GROUP, "hiddenIds");
-		final String legacyTiles = configManager.getConfiguration(CONFIG_GROUP, "hiddenTiles");
-		if ((legacyIds == null || legacyIds.isEmpty()) && (legacyTiles == null || legacyTiles.isEmpty()))
-		{
-			return;
-		}
-		final HideGroup migrated = migrateLegacy(legacyIds, legacyTiles);
-		configManager.setConfiguration(CONFIG_GROUP, "groups", gson.toJson(List.of(migrated)));
-		configManager.setConfiguration(CONFIG_GROUP, "activeGroup", migrated.getName());
-		configManager.unsetConfiguration(CONFIG_GROUP, "hiddenIds");
-		configManager.unsetConfiguration(CONFIG_GROUP, "hiddenTiles");
-		log.info("migrated legacy hide lists into group \"{}\"", migrated.getName());
-	}
+	// --- config (de)serialization ----------------------------------------------------
 
 	private void loadFromConfig()
 	{
-		final List<HideGroup> parsed = parseGroups(gson, config.groups());
-		final Set<Integer> ids;
+		final List<HideGroup> parsed = parseGroups(gson, config.groups(), bannedNames);
 		synchronized (this)
 		{
 			groups.clear();
 			groups.addAll(parsed);
 			activeGroupName = config.activeGroup();
 			ensureInvariants();
-			ids = effectiveIds(groups);
 		}
-		activeHiddenIds.clear();
-		activeHiddenIds.addAll(ids);
-		// activeAreaPairs is view-scoped (instance vs overworld) and is rebuilt
-		// on the client thread in rebuildActiveTilePoints()
 	}
 
 	private void saveToConfig()
@@ -1907,9 +1303,9 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			json = gson.toJson(groups);
 			active = activeGroupName;
 		}
-		// Writing config fires onConfigChanged, which re-syncs, invalidates
-		// affected zones, and rebuilds the panel.
-		configManager.setConfiguration(CONFIG_GROUP, "groups", json);
-		configManager.setConfiguration(CONFIG_GROUP, "activeGroup", active);
+		// Writing config fires onConfigChanged, which re-syncs, rebuilds the
+		// hidden-position set, invalidates zones, and rebuilds the panel.
+		configManager.setConfiguration(CONFIG_GROUP, GROUPS_KEY, json);
+		configManager.setConfiguration(CONFIG_GROUP, ACTIVE_KEY, active);
 	}
 }

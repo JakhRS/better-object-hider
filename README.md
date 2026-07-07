@@ -1,66 +1,64 @@
 # Better Object Hider
 
-Hide game objects individually (per tile) or by ID, organized into groups you can toggle and share. A successor to the classic Object Hider.
+Declutter your view by hiding the specific scenery objects you don't want to see — the one gnarled tree in a corner, a fence, a decoration — without touching identical objects elsewhere. Organize your hides into groups you can toggle and share.
 
-## Background
+## How it works
 
-After the Blood Moon Rises update I wanted to hide a few specific trees cluttering one spot in Vampyrium. Existing hiders work per object ID, so hiding those trees removed every identical tree across the whole region. This plugin adds per-tile hiding — hide that tree, keep the rest — plus the group management that a longer hide list ends up needing.
+You **shift+right-click a named object you can see** and choose to hide it. That's the whole interaction — there are no ID lists and nothing to type.
 
-Credit to [custom-object-hider](https://github.com/LuxOG/custom-object-hider) by LuxOG (BSD-2-Clause), whose rendering approach this plugin builds on.
+- A hide is stored by the object's **name plus a map location** (a specific tile, or the local area), the same way Ground Markers and Object Indicators store a spot. It is not tied to an object ID.
+- **Objects with no name can't be hidden.** If the game doesn't give an object a name, no hide option appears for it.
+- Hiding "Tree here" hides every object *named* "Tree" at that spot — it never singles out one variant of a shared name.
 
-## Comparison
+Everything is purely cosmetic and client-side: rendering suppression only. Nothing is sent to the server, nothing is automated, there are no network calls, and no object IDs are entered, stored, or targeted.
 
-| | Classic Object Hider | Better Object Hider |
-|---|---|---|
-| Hide every object with an ID | ✔ | ✔ |
-| Hide an ID only within the local area | — | ✔ |
-| Hide one specific object on one tile | — | ✔ |
-| Object types | All four | All four (game, wall, decoration, ground) |
-| Works in instances (POH, raids) | ID-hides only | ID- and tile-hides survive instance regeneration |
-| Organize hides | Single flat list | Named groups with enable/disable |
-| Share hides | — | Export/import via clipboard code |
-| Manage hides | Config text field | Side panel: names, coordinates, drag-and-drop |
-| Undo a hide | Reveal toggle | Reveal toggle or panel |
+**By design:**
 
-Purely cosmetic and client-side: rendering suppression only, nothing sent to the server, nothing automated, no network calls. Hides persist between sessions.
+- **Selection only** — you can only hide an object you've pointed at in the world; there is no way to type or paste an ID.
+- **Named objects only** — objects the game leaves nameless cannot be hidden at all.
+- **By name, never by ID** — hiding "Tree" hides every object *named* Tree in the scope you pick; it never targets one ID variant of a shared name.
 
 ## Usage
 
 ### Hiding
 
-1. Hold **Shift** and right-click a game object (Shift requirement can be disabled in config).
-2. Choose the scope:
-   - **Hide this one** — that object, that tile.
-   - **Hide all of ID in area** — every object of that type within the local map area (a 64×64 map square, the same unit Ground Markers uses). Works in instances: the area follows the instance template, so it survives regeneration.
-   - **Hide all of ID** — every object of that type, everywhere.
+1. Hold **Shift** and right-click a named scenery object (the Shift requirement can be turned off in config).
+2. Choose the reach:
+   - **Hide this** — that object's name, on that one tile.
+   - **Hide all in this area** — that object's name, anywhere in the local map region.
+   - **Hide all everywhere** — every object of that name, wherever it appears.
 
-The object disappears immediately; no scene reload.
+The object disappears immediately; no scene reload. (Objects the game leaves unnamed won't offer a hide option.)
 
 ### The side panel
 
+Open the **Better Object Hider** icon in the sidebar to manage everything:
+
 - **New group** creates a group. The orange group is *active* — new hides land there; click the circle icon on another group to switch.
-- The eye icon enables/disables a whole group's hides at once.
-- Click a group's name to collapse/expand it.
-- Repeated hides of the same object type stack as `Name ×N`; the stack's ✕ removes all of them, or expand to remove one at a time.
-- Drag an entry onto another group's header to move it there.
+- The eye icon enables or disables a whole group's hides at once.
+- Click a group's name to collapse or expand it.
+- Each row shows the object's name and where it's hidden — the readable area name where one exists (e.g. *Tzhaar Fight Caves*), otherwise the tile coordinates. The red ✕ unhides it.
+- Rows made inside an instance carry an **Instance** badge.
+- Drag any row onto another group's header to move it there.
+- Rename groups with the pencil icon; the export icon copies a group to your clipboard.
 
 ### Unhiding
 
-- Panel: click the ✕ next to an entry.
-- In the world: enable **Reveal hidden objects** in config, Shift+right-click the object, pick the Unhide option, then disable the toggle.
+- Panel: click the red ✕ next to a row.
+- In the world: enable **Reveal hidden objects** in config, shift+right-click the object, pick the Unhide option, then turn the toggle back off.
 
 ### Sharing groups
 
-- Export: click the export icon on a group header — the group is copied to your clipboard as a text code.
-- Import: copy someone's code, click **Import** in the panel.
+- **Export**: click the export icon on a group header — the group is copied to your clipboard as a text code.
+- **Import**: copy someone's code, then click **Import** in the panel.
 
-Imported codes are sanitized; malformed entries and disallowed objects are stripped.
+Codes contain object names and locations, and are sanitized on import (malformed or disallowed entries are dropped).
 
 ## Limitations
 
-- Hides are scoped to where they were made: hides created inside an instance apply only in instances (including every occurrence of that template chunk in a raid layout), and hides created in the overworld never affect instances.
-- A small set of raid-mechanic objects (e.g. the ToB Bloat pillar and Sotetseg maze tiles) cannot be hidden, and are stripped from imports, per plugin hub rules.
-- No pre-made hide lists ship with the plugin; sharing is user-to-user only.
+- Objects whose appearance changes with game state (morphing/multiloc objects) are matched on their base name and may not hide reliably.
+- Hides made inside an instance are tagged as such and apply only in instanced areas that use the same map template; they never affect the overworld.
+- A small set of raid-mechanic objects can't be hidden and are stripped from imports, per plugin hub rules.
 
 ## Support
 
