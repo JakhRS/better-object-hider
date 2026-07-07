@@ -404,8 +404,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	private void addMenuEntries(TileObject obj, String target)
 	{
 		final String name = resolveName(obj.getId());
-		// The compliance gate: objects with no name simply cannot be hidden.
-		if (name == null || bannedNames.contains(name))
+		// The compliance gate: unnamed objects can never be hidden, and a hardcoded
+		// safety list is blocked two ways — directly by object id (robust, no
+		// timing dependency) and by resolved name (also covers imports).
+		if (name == null || BANNED_OBJECT_IDS.contains(obj.getId()) || bannedNames.contains(name))
 		{
 			return;
 		}
