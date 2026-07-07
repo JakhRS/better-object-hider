@@ -50,8 +50,12 @@ import net.runelite.api.TileObject;
 import net.runelite.api.WorldView;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.DecorativeObjectSpawned;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GroundObjectSpawned;
 import net.runelite.api.events.MenuOpened;
+import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.api.events.WorldViewLoaded;
 import net.runelite.api.gameval.ObjectID;
 import net.runelite.api.hooks.DrawCallbacks;
@@ -149,6 +153,13 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	// a cheap position lookup. Concurrent because drawObject reads it off-thread.
 	private final Set<String> hiddenPositions = ConcurrentHashMap.newKeySet();
 
+	// Snapshot of the enabled-group hides + their names, recomputed on every
+	// config change. Read (without locking) by the scene scan and by the object
+	// spawn handlers, so newly-spawned objects can be matched without touching
+	// the groups list.
+	private volatile Set<HideEntry> effectiveEntries = Set.of();
+	private volatile Set<String> effectiveNames = Set.of();
+
 	// Names of banned mechanic objects, resolved once on the client thread.
 	private final Set<String> bannedNames = ConcurrentHashMap.newKeySet();
 
@@ -243,6 +254,54 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		refresh();
 	}
 
+	// Objects that spawn AFTER the scene has settled (e.g. objects a boss spawns
+	// mid-fight) never go through the full scan, so match them individually here.
+	// All spawn events are on the client thread, where name resolution is safe.
+
+	@Subscribe
+	public void onGameObjectSpawned(GameObjectSpawned event)
+	{
+		handleSpawn(event.getGameObject());
+	}
+
+	@Subscribe
+	public void onWallObjectSpawned(WallObjectSpawned event)
+	{
+		handleSpawn(event.getWallObject());
+	}
+
+	@Subscribe
+	public void onDecorativeObjectSpawned(DecorativeObjectSpawned event)
+	{
+		handleSpawn(event.getDecorativeObject());
+	}
+
+	@Subscribe
+	public void onGroundObjectSpawned(GroundObjectSpawned event)
+	{
+		handleSpawn(event.getGroundObject());
+	}
+
+	private void handleSpawn(TileObject obj)
+	{
+		if (obj == null || effectiveNames.isEmpty())
+		{
+			return;
+		}
+		final String name = resolveName(obj.getId());
+		if (name == null || !effectiveNames.contains(name))
+		{
+			return;
+		}
+		if (matchesAny(effectiveEntries, obj, name)
+			&& hiddenPositions.add(tileKey(obj.getId(), obj.getWorldLocation())))
+		{
+			// Force this object's zone to re-upload suppressed (static spawns);
+			// animated objects re-evaluate drawObject next frame regardless.
+			invalidateObjectZone(obj);
+		}
+	}
+
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
@@ -250,7 +309,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-		if (ACTIVE_KEY.equals(event.getKey()))
+		if (ACTIVE_KEY.equals(event.getKey()) || "showHelp".equals(event.getKey()))
 		{
 			synchronized (this)
 			{
@@ -303,16 +362,12 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		{
 			return;
 		}
-		final Set<HideEntry> effective;
-		synchronized (this)
-		{
-			effective = effectiveEntries(groups);
-		}
+		final Set<HideEntry> effective = effectiveEntries;
+		final Set<String> names = effectiveNames;
 		if (effective.isEmpty())
 		{
 			return;
 		}
-		final Set<String> names = entryNames(effective);
 
 		final Scene scene = wv.getScene();
 		for (Tile[][] plane : scene.getTiles())
@@ -803,6 +858,17 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return config.revealAll();
 	}
 
+	public boolean isShowHelp()
+	{
+		return config.showHelp();
+	}
+
+	/** Called by the panel's help-box dismiss control. */
+	public void dismissHelp()
+	{
+		configManager.setConfiguration(CONFIG_GROUP, "showHelp", false);
+	}
+
 	/**
 	 * Copies the group's JSON to the clipboard. Feedback goes to game chat when
 	 * logged in (like Ground Markers); otherwise the message is returned for a dialog.
@@ -1251,6 +1317,21 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 	}
 
+	/** Invalidates the single zone containing one just-matched spawned object. Client thread. */
+	private void invalidateObjectZone(TileObject obj)
+	{
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		final WorldView wv = client.getTopLevelWorldView();
+		final DrawCallbacks dc = client.getDrawCallbacks();
+		if (wv != null && dc != null)
+		{
+			invalidateZoneForObject(wv.getScene(), dc, obj, new HashSet<>());
+		}
+	}
+
 	// --- panel accessors -------------------------------------------------------------
 
 	/** Deep-ish snapshot for the EDT: safe to iterate while groups mutate. */
@@ -1287,13 +1368,18 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	private void loadFromConfig()
 	{
 		final List<HideGroup> parsed = parseGroups(gson, config.groups(), bannedNames);
+		final Set<HideEntry> effective;
 		synchronized (this)
 		{
 			groups.clear();
 			groups.addAll(parsed);
 			activeGroupName = config.activeGroup();
 			ensureInvariants();
+			effective = effectiveEntries(groups);
 		}
+		// Publish the caches the scene scan and spawn handlers read lock-free
+		effectiveEntries = effective;
+		effectiveNames = entryNames(effective);
 	}
 
 	private void saveToConfig()

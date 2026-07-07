@@ -37,10 +37,21 @@ public interface BetterObjectHiderConfig extends Config
 		return false;
 	}
 
+	@ConfigItem(
+		position = 2,
+		keyName = "showHelp",
+		name = "Show usage help",
+		description = "Show the short how-to box at the top of the side panel"
+	)
+	default boolean showHelp()
+	{
+		return true;
+	}
+
 	@Range(max = 10080)
 	@Units(Units.MINUTES)
 	@ConfigItem(
-		position = 2,
+		position = 3,
 		keyName = "activeGroupTimeoutMinutes",
 		name = "Active group timeout",
 		description = "If the active group hasn't been used for this long, new hides go back to the Default group "

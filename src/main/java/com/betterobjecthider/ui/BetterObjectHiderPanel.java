@@ -206,6 +206,14 @@ public class BetterObjectHiderPanel extends PluginPanel
 		// the hint, not an empty group section competing with it
 		final boolean pristine = totalEntries == 0 && groups.size() == 1;
 
+		if (plugin.isShowHelp())
+		{
+			listPanel.add(buildHelpBox(), c);
+			c.gridy++;
+			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
+			c.gridy++;
+		}
+
 		if (plugin.isRevealAll())
 		{
 			listPanel.add(buildRevealBanner(), c);
@@ -241,6 +249,25 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		revalidate();
 		repaint();
+	}
+
+	private JPanel buildHelpBox()
+	{
+		final JPanel box = new JPanel(new BorderLayout(6, 0));
+		box.setBorder(new EmptyBorder(6, 8, 6, 6));
+		box.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+
+		final JLabel text = new JLabel("<html>Shift + right-click an object to hide it."
+			+ " Create groups to organize your hides.</html>");
+		text.setFont(FontManager.getRunescapeSmallFont());
+		text.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+
+		final JLabel dismiss = iconLabel(DELETE, DELETE_HOVER, "Dismiss (re-enable in config)",
+			plugin::dismissHelp);
+
+		box.add(text, BorderLayout.CENTER);
+		box.add(dismiss, BorderLayout.EAST);
+		return box;
 	}
 
 	private JPanel buildRevealBanner()
