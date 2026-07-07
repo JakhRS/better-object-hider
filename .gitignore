@@ -11,3 +11,6 @@ bin/
 .claude/
 .vscode/
 CLAUDE.md
+
+# Internal dev handoff notes — not part of the published plugin
+FIGHT_CAVES_AREA_HIDE_FIX.md

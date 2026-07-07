@@ -7,6 +7,7 @@
 package com.betterobjecthider;
 
 import com.google.gson.Gson;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -89,14 +90,93 @@ public class BetterObjectHiderLogicTest
 		final HideGroup on = group("On", true);
 		on.getIds().add(1276);
 		on.getTiles().add("1276:12850:22:18:0");
+		on.getAreas().add("1276:12850");
 
 		final HideGroup off = group("Off", false);
 		off.getIds().add(9999);
 		off.getTiles().add("9999:12850:23:19:0");
+		off.getAreas().add("9999:12850");
 
 		final List<HideGroup> groups = List.of(on, off);
 		assertEquals(Set.of(1276), BetterObjectHiderPlugin.effectiveIds(groups));
 		assertEquals(Set.of("1276:12850:22:18:0"), BetterObjectHiderPlugin.effectiveTiles(groups));
+		assertEquals(Set.of("1276:12850"), BetterObjectHiderPlugin.effectiveAreas(groups));
+	}
+
+	// --- area entries -------------------------------------------------------------------
+
+	@Test
+	public void parseAreaEntryValidatesFormat()
+	{
+		assertArrayEquals(new int[]{1276, 12850}, BetterObjectHiderPlugin.parseAreaEntry("1276:12850"));
+		assertArrayEquals(new int[]{1276, 12850}, BetterObjectHiderPlugin.parseAreaEntry("1276:12850:i"));
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry(""));
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("1276"));
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("1276:12850:0")); // tile format, not area
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("1276:12850:x")); // bad scope suffix
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("a:b"));
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("0:12850"));  // id must be positive
+		assertNull(BetterObjectHiderPlugin.parseAreaEntry("1276:-1"));
+	}
+
+	@Test
+	public void instanceScopeSuffixIsParsedAndDetected()
+	{
+		// Tile entries accept the ":i" instance tag
+		assertArrayEquals(new int[]{1276, 12850, 22, 18, 0},
+			BetterObjectHiderPlugin.parseTileEntry("1276:12850:22:18:0:i"));
+		assertNull(BetterObjectHiderPlugin.parseTileEntry("1276:12850:22:18:0:x"));
+		assertNull(BetterObjectHiderPlugin.parseTileEntry("1276:12850:22:18:0:i:i"));
+
+		assertTrue(BetterObjectHiderPlugin.isInstanceEntry("1276:12850:22:18:0:i"));
+		assertTrue(BetterObjectHiderPlugin.isInstanceEntry("1276:12850:i"));
+		assertFalse(BetterObjectHiderPlugin.isInstanceEntry("1276:12850:22:18:0"));
+		assertFalse(BetterObjectHiderPlugin.isInstanceEntry("1276:12850"));
+
+		assertEquals("1276:12850:i", BetterObjectHiderPlugin.scoped("1276:12850", true));
+		assertEquals("1276:12850", BetterObjectHiderPlugin.scoped("1276:12850", false));
+	}
+
+	@Test
+	public void scopedEntriesOnlyMatchTheirOwnViewUnlessRestoring()
+	{
+		final String area = "11850:9551";
+		final Set<String> instanceEntries = Set.of("11850:9551:i");
+		final Set<String> overworldEntries = Set.of("11850:9551");
+
+		assertTrue(BetterObjectHiderPlugin.containsScopedEntry(instanceEntries, area, true, false));
+		assertFalse(BetterObjectHiderPlugin.containsScopedEntry(instanceEntries, area, false, false));
+		assertTrue(BetterObjectHiderPlugin.containsScopedEntry(instanceEntries, area, false, true));
+
+		assertTrue(BetterObjectHiderPlugin.containsScopedEntry(overworldEntries, area, false, false));
+		assertFalse(BetterObjectHiderPlugin.containsScopedEntry(overworldEntries, area, true, false));
+		assertTrue(BetterObjectHiderPlugin.containsScopedEntry(overworldEntries, area, true, true));
+	}
+
+	@Test
+	public void sanitizeGroupFiltersAreaEntries()
+	{
+		final HideGroup dirty = group("Areas", true);
+		dirty.getAreas().add("1276:12850");
+		dirty.getAreas().add("garbage");
+		dirty.getAreas().add(ObjectID.TOB_BLOAT_PILLAR + ":12850"); // banned
+
+		final HideGroup clean = BetterObjectHiderPlugin.sanitizeGroup(dirty);
+		assertEquals(Set.of("1276:12850"), clean.getAreas());
+	}
+
+	@Test
+	public void moveAreaTransfersBetweenGroups()
+	{
+		final HideGroup a = group("A", true);
+		a.getAreas().add("1276:12850");
+		final HideGroup b = group("B", true);
+		final List<HideGroup> groups = List.of(a, b);
+
+		assertTrue(BetterObjectHiderPlugin.moveArea(groups, "A", "B", "1276:12850"));
+		assertTrue(a.getAreas().isEmpty());
+		assertEquals(Set.of("1276:12850"), b.getAreas());
+		assertFalse(BetterObjectHiderPlugin.moveArea(groups, "A", "B", "1276:12850"));
 	}
 
 	// --- sanitization --------------------------------------------------------------------
@@ -148,6 +228,20 @@ public class BetterObjectHiderLogicTest
 		final String longName = "x".repeat(100);
 		assertEquals(BetterObjectHiderPlugin.MAX_GROUP_NAME_LENGTH,
 			BetterObjectHiderPlugin.sanitizeName(longName).length());
+	}
+
+	@Test
+	public void sanitizeNameStripsMarkup()
+	{
+		// A leading "<html>" in a JLabel triggers Swing markup rendering (remote <img> fetch);
+		// angle brackets must never survive into a displayed name.
+		final String stripped = BetterObjectHiderPlugin.sanitizeName("<html><img src=http://evil/x>");
+		assertFalse(stripped.contains("<"));
+		assertFalse(stripped.contains(">"));
+		assertEquals("Trees", BetterObjectHiderPlugin.sanitizeName("Tr<ee>s"));
+		// A name that is ONLY markup collapses to the default, never empty
+		assertEquals(BetterObjectHiderPlugin.DEFAULT_GROUP_NAME,
+			BetterObjectHiderPlugin.sanitizeName("<<>>"));
 	}
 
 	@Test
@@ -215,6 +309,21 @@ public class BetterObjectHiderLogicTest
 		assertTrue(migrated.getTiles().isEmpty());
 	}
 
+	// --- Default group safeguard ----------------------------------------------------------
+
+	@Test
+	public void defaultGroupIsRecreatedWhenMissing()
+	{
+		final List<HideGroup> groups = new ArrayList<>(List.of(group("POH", true)));
+		BetterObjectHiderPlugin.ensureDefaultGroup(groups);
+		assertEquals(2, groups.size());
+		assertEquals(BetterObjectHiderPlugin.DEFAULT_GROUP_NAME, groups.get(0).getName());
+
+		// Idempotent: never duplicates an existing Default
+		BetterObjectHiderPlugin.ensureDefaultGroup(groups);
+		assertEquals(2, groups.size());
+	}
+
 	// --- drag-and-drop moves --------------------------------------------------------------
 
 	@Test
@@ -265,6 +374,34 @@ public class BetterObjectHiderLogicTest
 		assertEquals(Set.of("1276:12850:22:18:0", "1276:12850:23:18:0"), b.getTiles());
 
 		assertFalse(BetterObjectHiderPlugin.moveTilesOfId(groups, "A", "B", 1276));
+	}
+
+	// --- active-group timeout --------------------------------------------------------------
+
+	@Test
+	public void activeGroupExpiryRespectsTimeout()
+	{
+		final long now = 1_000_000_000_000L;
+		final long minute = 60_000L;
+
+		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired(String.valueOf(now - 59 * minute), now, 60));
+		assertTrue(BetterObjectHiderPlugin.isActiveGroupExpired(String.valueOf(now - 61 * minute), now, 60));
+		// 0 = disabled, even for ancient timestamps
+		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired(String.valueOf(now - 999_999 * minute), now, 0));
+		// Corrupt/missing values never trigger a reset
+		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired("garbage", now, 60));
+		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired(null, now, 60));
+	}
+
+	@Test
+	public void expiryTargetPrefersDefaultThenFirst()
+	{
+		assertEquals(BetterObjectHiderPlugin.DEFAULT_GROUP_NAME, BetterObjectHiderPlugin.expiryTarget(
+			List.of(group("POH", true), group(BetterObjectHiderPlugin.DEFAULT_GROUP_NAME, true))));
+		assertEquals("POH", BetterObjectHiderPlugin.expiryTarget(
+			List.of(group("POH", true), group("GE", true))));
+		assertEquals(BetterObjectHiderPlugin.DEFAULT_GROUP_NAME,
+			BetterObjectHiderPlugin.expiryTarget(List.of()));
 	}
 
 	// --- helpers -------------------------------------------------------------------------

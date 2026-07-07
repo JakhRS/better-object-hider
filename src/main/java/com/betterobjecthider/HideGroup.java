@@ -23,4 +23,7 @@ public class HideGroup
 	private Set<Integer> ids = new HashSet<>();
 	// Specific objects by tile, "id:regionId:regionX:regionY:plane"
 	private Set<String> tiles = new HashSet<>();
+	// Object IDs hidden within one map region (64x64), "id:regionId".
+	// Absent in pre-area exports; Gson leaves the initializer, so old codes import fine.
+	private Set<String> areas = new HashSet<>();
 }

@@ -10,30 +10,32 @@ import com.betterobjecthider.BetterObjectHiderPlugin;
 import com.betterobjecthider.HideGroup;
 import java.awt.BorderLayout;
 import java.awt.Color;
-import java.awt.Component;
-import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.GridLayout;
-import java.awt.Point;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Consumer;
 import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
-import javax.swing.JCheckBox;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.SwingUtilities;
+import javax.swing.TransferHandler;
 import javax.swing.border.EmptyBorder;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.ui.ColorScheme;
@@ -41,9 +43,13 @@ import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.ui.components.PluginErrorPanel;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.util.LinkBrowser;
 
 public class BetterObjectHiderPanel extends PluginPanel
 {
+	private static final String REPO_URL = "https://github.com/JakhRS/better-object-hider";
+	private static final String KOFI_URL = "https://ko-fi.com/jakhrs";
+
 	private static final ImageIcon CHEVRON_RIGHT;
 	private static final ImageIcon CHEVRON_DOWN;
 	private static final ImageIcon ACTIVE_ON;
@@ -53,6 +59,19 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private static final ImageIcon EXPORT_HOVER;
 	private static final ImageIcon DELETE;
 	private static final ImageIcon DELETE_HOVER;
+	private static final ImageIcon EYE_OPEN;
+	private static final ImageIcon EYE_OPEN_HOVER;
+	private static final ImageIcon EYE_CLOSED;
+	private static final ImageIcon EYE_CLOSED_HOVER;
+	private static final ImageIcon HEART;
+	private static final ImageIcon HEART_HOVER;
+	private static final ImageIcon CODE;
+	private static final ImageIcon CODE_HOVER;
+	private static final ImageIcon RENAME;
+	private static final ImageIcon RENAME_HOVER;
+
+	// Local-JVM DnD flavor: the payload is passed as a live object, never serialized
+	private static final DataFlavor DRAG_FLAVOR = new DataFlavor(DragPayload.class, "Better Object Hider drag payload");
 
 	static
 	{
@@ -62,6 +81,11 @@ public class BetterObjectHiderPanel extends PluginPanel
 		final BufferedImage activeOff = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "active_off.png");
 		final BufferedImage export = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "export.png");
 		final BufferedImage delete = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "delete.png");
+		final BufferedImage eyeOpen = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "eye_open.png");
+		final BufferedImage eyeClosed = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "eye_closed.png");
+		final BufferedImage heart = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "heart.png");
+		final BufferedImage code = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "code.png");
+		final BufferedImage rename = ImageUtil.loadImageResource(BetterObjectHiderPanel.class, "rename.png");
 
 		CHEVRON_RIGHT = new ImageIcon(chevronRight);
 		CHEVRON_DOWN = new ImageIcon(chevronDown);
@@ -72,6 +96,16 @@ public class BetterObjectHiderPanel extends PluginPanel
 		EXPORT_HOVER = new ImageIcon(export);
 		DELETE = new ImageIcon(ImageUtil.alphaOffset(delete, -80));
 		DELETE_HOVER = new ImageIcon(delete);
+		EYE_OPEN = new ImageIcon(eyeOpen);
+		EYE_OPEN_HOVER = new ImageIcon(ImageUtil.alphaOffset(eyeOpen, -80));
+		EYE_CLOSED = new ImageIcon(eyeClosed);
+		EYE_CLOSED_HOVER = new ImageIcon(ImageUtil.alphaOffset(eyeClosed, -80));
+		HEART = new ImageIcon(ImageUtil.alphaOffset(heart, -80));
+		HEART_HOVER = new ImageIcon(heart);
+		CODE = new ImageIcon(ImageUtil.alphaOffset(code, -80));
+		CODE_HOVER = new ImageIcon(code);
+		RENAME = new ImageIcon(ImageUtil.alphaOffset(rename, -80));
+		RENAME_HOVER = new ImageIcon(rename);
 	}
 
 	private final BetterObjectHiderPlugin plugin;
@@ -80,9 +114,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 	// Survives rebuild(): expanded/collapsed per group name (default expanded)
 	private final Map<String, Boolean> expandedState = new HashMap<>();
 
-	// Drag-and-drop state: rows can be dropped onto group headers to move hides
-	private final List<JPanel> headerPanels = new ArrayList<>();
-	private boolean dragging;
 	private JPanel highlightedHeader;
 
 	public BetterObjectHiderPanel(BetterObjectHiderPlugin plugin)
@@ -96,6 +127,17 @@ public class BetterObjectHiderPanel extends PluginPanel
 		title.setFont(FontManager.getRunescapeBoldFont());
 		title.setForeground(Color.WHITE);
 
+		final JPanel links = new JPanel(new GridLayout(1, 0, 8, 0));
+		links.setOpaque(false);
+		links.add(iconLabel(CODE, CODE_HOVER, "Source code & issue tracker (GitHub)",
+			() -> LinkBrowser.browse(REPO_URL)));
+		links.add(iconLabel(HEART, HEART_HOVER, "Enjoying the plugin? Buy me a Bond (Ko-fi)",
+			() -> LinkBrowser.browse(KOFI_URL)));
+
+		final JPanel titleRow = new JPanel(new BorderLayout());
+		titleRow.add(title, BorderLayout.WEST);
+		titleRow.add(links, BorderLayout.EAST);
+
 		final JButton newGroupButton = new JButton("New group");
 		newGroupButton.setToolTipText("Create a new hide group");
 		newGroupButton.addActionListener(e -> promptNewGroup());
@@ -103,7 +145,11 @@ public class BetterObjectHiderPanel extends PluginPanel
 		final JButton importButton = new JButton("Import");
 		importButton.setToolTipText("Import a hide group from the clipboard");
 		importButton.addActionListener(e ->
-			JOptionPane.showMessageDialog(this, plugin.importGroupFromClipboard()));
+		{
+			final BetterObjectHiderPlugin.ImportResult result = plugin.importGroupFromClipboard();
+			JOptionPane.showMessageDialog(this, result.message, "Import hide group",
+				result.success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE);
+		});
 
 		final JPanel buttons = new JPanel(new GridLayout(1, 2, 6, 0));
 		buttons.add(newGroupButton);
@@ -111,7 +157,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		final JPanel northPanel = new JPanel(new BorderLayout(0, 8));
 		northPanel.setBorder(new EmptyBorder(1, 0, 10, 0));
-		northPanel.add(title, BorderLayout.NORTH);
+		northPanel.add(titleRow, BorderLayout.NORTH);
 		northPanel.add(buttons, BorderLayout.CENTER);
 
 		emptyPanel.setContent("No hidden objects",
@@ -134,7 +180,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 		c.gridy = 0;
 
 		listPanel.removeAll();
-		headerPanels.clear();
+		highlightedHeader = null;
 
 		final List<HideGroup> groups = plugin.getGroupsSnapshot();
 		final String activeName = plugin.getActiveGroupName();
@@ -142,28 +188,43 @@ public class BetterObjectHiderPanel extends PluginPanel
 		int totalEntries = 0;
 		for (final HideGroup group : groups)
 		{
-			totalEntries += group.getIds().size() + group.getTiles().size();
-			final boolean expanded = expandedState.getOrDefault(group.getName(), true);
+			totalEntries += group.getIds().size() + group.getTiles().size() + group.getAreas().size();
+		}
 
-			final JPanel header = buildGroupHeader(group, group.getName().equals(activeName), expanded);
-			headerPanels.add(header);
-			listPanel.add(header, c);
+		// Fresh-install state: one pristine group and nothing hidden — show only
+		// the hint, not an empty group section competing with it
+		final boolean pristine = totalEntries == 0 && groups.size() == 1;
+
+		if (plugin.isRevealAll())
+		{
+			listPanel.add(buildRevealBanner(), c);
 			c.gridy++;
-
-			if (expanded)
-			{
-				for (final JPanel row : buildGroupRows(group))
-				{
-					listPanel.add(row, c);
-					c.gridy++;
-				}
-			}
 			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
 			c.gridy++;
 		}
 
-		// Hint for the fresh-install state: one pristine group, nothing hidden yet
-		final boolean pristine = totalEntries == 0 && groups.size() == 1;
+		if (!pristine)
+		{
+			for (final HideGroup group : groups)
+			{
+				final boolean expanded = expandedState.getOrDefault(group.getName(), true);
+
+				listPanel.add(buildGroupHeader(group, group.getName().equals(activeName), expanded), c);
+				c.gridy++;
+
+				if (expanded)
+				{
+					for (final JPanel row : buildGroupRows(group))
+					{
+						listPanel.add(row, c);
+						c.gridy++;
+					}
+				}
+				listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
+				c.gridy++;
+			}
+		}
+
 		emptyPanel.setVisible(pristine);
 		listPanel.add(emptyPanel, c);
 
@@ -171,19 +232,67 @@ public class BetterObjectHiderPanel extends PluginPanel
 		repaint();
 	}
 
+	private JPanel buildRevealBanner()
+	{
+		final JPanel banner = new JPanel(new BorderLayout());
+		banner.setBorder(new EmptyBorder(6, 8, 6, 8));
+		banner.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+
+		final JLabel label = new JLabel("<html>Reveal mode is on — hidden objects are visible."
+			+ " Turn off \"Reveal hidden objects\" in the config to re-hide.</html>");
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(ColorScheme.BRAND_ORANGE);
+		banner.add(label, BorderLayout.CENTER);
+		return banner;
+	}
+
 	// --- group header ------------------------------------------------------------------
 
 	private JPanel buildGroupHeader(HideGroup group, boolean active, boolean expanded)
 	{
 		final String name = group.getName();
-		final int count = group.getIds().size() + group.getTiles().size();
+		final int count = group.getIds().size() + group.getTiles().size() + group.getAreas().size();
 
-		final JPanel header = new JPanel(new BorderLayout());
+		// Two lines: full-width name (no truncation), then evenly-spaced controls
+		final JPanel header = new JPanel(new BorderLayout(0, 4));
 		header.setBorder(new EmptyBorder(6, 6, 6, 6));
 		header.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		header.putClientProperty("bohGroupName", name);
+
+		// Drop target: rows dragged here move into this group
+		header.setTransferHandler(new TransferHandler()
+		{
+			@Override
+			public boolean canImport(TransferSupport support)
+			{
+				if (!support.isDataFlavorSupported(DRAG_FLAVOR))
+				{
+					return false;
+				}
+				highlightHeader(header);
+				return true;
+			}
+
+			@Override
+			public boolean importData(TransferSupport support)
+			{
+				highlightHeader(null);
+				try
+				{
+					final DragPayload payload = (DragPayload)
+						support.getTransferable().getTransferData(DRAG_FLAVOR);
+					payload.moveToGroup.accept(name);
+					return true;
+				}
+				catch (UnsupportedFlavorException | java.io.IOException ex)
+				{
+					return false;
+				}
+			}
+		});
 
 		final JLabel nameLabel = new JLabel(name + " (" + count + ")");
+		// Defense in depth: never interpret an (untrusted) group name as HTML
+		nameLabel.putClientProperty("html.disable", Boolean.TRUE);
 		nameLabel.setIcon(expanded ? CHEVRON_DOWN : CHEVRON_RIGHT);
 		nameLabel.setIconTextGap(6);
 		nameLabel.setFont(FontManager.getRunescapeBoldFont());
@@ -191,6 +300,9 @@ public class BetterObjectHiderPanel extends PluginPanel
 		nameLabel.setToolTipText(active
 			? "Active group — new hides are added here. Click to collapse/expand."
 			: "Click to collapse/expand");
+
+		// The full-width name row is the collapse toggle; keeping it off the
+		// icon row prevents accidental toggles when clicking between icons
 		nameLabel.addMouseListener(new MouseAdapter()
 		{
 			@Override
@@ -205,12 +317,14 @@ public class BetterObjectHiderPanel extends PluginPanel
 		controls.setOpaque(false);
 		controls.setLayout(new GridLayout(1, 0, 6, 0));
 
-		final JCheckBox enabledBox = new JCheckBox();
-		enabledBox.setSelected(group.isEnabled());
-		enabledBox.setOpaque(false);
-		enabledBox.setToolTipText("Enable/disable this group's hides");
-		enabledBox.addActionListener(e -> plugin.setGroupEnabled(name, enabledBox.isSelected()));
-		controls.add(enabledBox);
+		// Visibility toggle (an unchecked JCheckBox is nearly invisible on the dark theme)
+		final boolean enabled = group.isEnabled();
+		controls.add(iconLabel(
+			enabled ? EYE_OPEN : EYE_CLOSED,
+			enabled ? EYE_OPEN_HOVER : EYE_CLOSED_HOVER,
+			enabled ? "Hides active — click to disable this group (its objects reappear)"
+				: "Group disabled, objects visible — click to re-enable",
+			() -> plugin.setGroupEnabled(name, !enabled)));
 
 		if (!active)
 		{
@@ -220,30 +334,56 @@ public class BetterObjectHiderPanel extends PluginPanel
 		else
 		{
 			final JLabel activeDot = new JLabel(ACTIVE_ON);
+			activeDot.setHorizontalAlignment(JLabel.CENTER);
 			activeDot.setToolTipText("Active group");
 			controls.add(activeDot);
 		}
 
-		controls.add(iconLabel(EXPORT, EXPORT_HOVER, "Export group to clipboard",
-			() -> JOptionPane.showMessageDialog(this, plugin.exportGroupToClipboard(name))));
+		final boolean isDefault = BetterObjectHiderPlugin.DEFAULT_GROUP_NAME.equals(name);
+		if (!isDefault)
+		{
+			controls.add(iconLabel(RENAME, RENAME_HOVER, "Rename group", () -> promptRename(name)));
+		}
 
-		controls.add(iconLabel(DELETE, DELETE_HOVER, "Delete group", () ->
+		controls.add(iconLabel(EXPORT, EXPORT_HOVER, "Export group to clipboard", () ->
+		{
+			// Feedback arrives via game chat when logged in; dialog only as fallback
+			final String message = plugin.exportGroupToClipboard(name);
+			if (message != null)
+			{
+				JOptionPane.showMessageDialog(this, message, "Export hide group",
+					JOptionPane.INFORMATION_MESSAGE);
+			}
+		}));
+
+		controls.add(iconLabel(DELETE, DELETE_HOVER,
+			isDefault ? "Clear group (the Default group can't be deleted)" : "Delete group", () ->
 		{
 			final int confirm = JOptionPane.showConfirmDialog(this,
-				"Delete group \"" + name + "\" and unhide its " + count + " entries?",
-				"Delete group", JOptionPane.OK_CANCEL_OPTION);
+				isDefault
+					? "Clear all " + count + " entries from \"" + name + "\"?"
+					: "Delete group \"" + name + "\" and unhide its " + count + " entries?",
+				(isDefault ? "Clear" : "Delete") + " group", JOptionPane.OK_CANCEL_OPTION);
 			if (confirm == JOptionPane.OK_OPTION)
 			{
 				plugin.deleteGroup(name);
 			}
 		}));
 
-		header.add(nameLabel, BorderLayout.CENTER);
-		header.add(controls, BorderLayout.EAST);
+		header.add(nameLabel, BorderLayout.NORTH);
+		header.add(controls, BorderLayout.CENTER);
 		return header;
 	}
 
 	// --- group body --------------------------------------------------------------------
+
+	/** Sorts object IDs by resolved display name (users think in names, not IDs). */
+	private Comparator<Integer> byObjectName()
+	{
+		return Comparator
+			.<Integer, String>comparing(id -> plugin.getObjectName(id).toLowerCase())
+			.thenComparingInt(id -> id);
+	}
 
 	private List<JPanel> buildGroupRows(HideGroup group)
 	{
@@ -252,12 +392,40 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		// "Hide all of ID" entries
 		final List<Integer> sortedIds = new ArrayList<>(group.getIds());
-		sortedIds.sort(null);
+		sortedIds.sort(byObjectName());
 		for (final int objectId : sortedIds)
 		{
-			rows.add(buildRow(plugin.getObjectName(objectId), "All of ID " + objectId, 0,
+			rows.add(buildRow(plugin.getObjectName(objectId), "All of ID " + objectId, 0, false,
 				() -> plugin.removeIdFromGroup(groupName, objectId),
 				target -> plugin.moveIdToGroup(groupName, target, objectId)));
+		}
+
+		// Area-scoped entries ("hide all of ID in area")
+		final Map<Integer, List<String>> areasById = new TreeMap<>();
+		for (final String entry : group.getAreas())
+		{
+			final int[] parts = BetterObjectHiderPlugin.parseAreaEntry(entry);
+			if (parts != null)
+			{
+				areasById.computeIfAbsent(parts[0], k -> new ArrayList<>()).add(entry);
+			}
+		}
+		final List<Integer> areaIds = new ArrayList<>(areasById.keySet());
+		areaIds.sort(byObjectName());
+		for (final int objectId : areaIds)
+		{
+			for (final String entry : areasById.get(objectId))
+			{
+				final int[] parts = BetterObjectHiderPlugin.parseAreaEntry(entry);
+				// Region ID → its south-west corner, a recognizable landmark coordinate
+				final int rx = (parts[1] >>> 8) << 6;
+				final int ry = (parts[1] & 0xff) << 6;
+				final ScopeBadge scope = scopeBadgeForEntry(entry);
+				rows.add(buildRow(plugin.getObjectName(objectId),
+					"Area near " + rx + ", " + ry + " (ID " + objectId + ")", 0, false, scope,
+					() -> plugin.removeAreaFromGroup(groupName, entry),
+					target -> plugin.moveAreaToGroup(groupName, target, entry)));
+			}
 		}
 
 		// Tile entries, collapsed per object ID
@@ -270,30 +438,43 @@ public class BetterObjectHiderPanel extends PluginPanel
 				byId.computeIfAbsent(parts[0], k -> new ArrayList<>()).add(entry);
 			}
 		}
-		for (final Map.Entry<Integer, List<String>> e : byId.entrySet())
+		final List<Integer> tileIds = new ArrayList<>(byId.keySet());
+		tileIds.sort(byObjectName());
+		for (final int objectId : tileIds)
 		{
-			final int objectId = e.getKey();
-			final List<String> entries = e.getValue();
+			final List<String> entries = byId.get(objectId);
 			entries.sort(null);
 
 			if (entries.size() == 1)
 			{
 				final String entry = entries.get(0);
 				rows.add(buildRow(plugin.getObjectName(objectId),
-					tileDetail(entry) + " (ID " + objectId + ")", 0,
+					tileDetail(entry) + " (ID " + objectId + ")", 0, false, scopeBadgeForEntry(entry),
 					() -> plugin.removeTileFromGroup(groupName, entry),
 					target -> plugin.moveTileToGroup(groupName, target, entry)));
 				continue;
 			}
 
-			// Same-type sub-header with a remove-all, then the individual tiles
-			rows.add(buildRow(plugin.getObjectName(objectId) + " ×" + entries.size(),
-				"ID " + objectId + " — remove all", 0,
-				() -> plugin.removeTilesOfIdFromGroup(groupName, objectId),
+			// Same-type sub-header with a confirmed remove-all, then the individual tiles
+			final int count = entries.size();
+			final String objectName = plugin.getObjectName(objectId);
+			rows.add(buildRow(objectName + " ×" + count,
+				"ID " + objectId + " — remove all", 0, false, scopeBadgeForEntries(entries),
+				() ->
+				{
+					// Bulk unhide has no undo; one confirm is worth it (single ✕ stays instant)
+					final int confirm = JOptionPane.showConfirmDialog(this,
+						"Unhide all " + count + " hidden \"" + objectName + "\" in \"" + groupName + "\"?",
+						"Unhide all", JOptionPane.OK_CANCEL_OPTION);
+					if (confirm == JOptionPane.OK_OPTION)
+					{
+						plugin.removeTilesOfIdFromGroup(groupName, objectId);
+					}
+				},
 				target -> plugin.moveTilesOfIdToGroup(groupName, target, objectId)));
 			for (final String entry : entries)
 			{
-				rows.add(buildRow(tileDetail(entry), null, 12,
+				rows.add(buildRow(tileDetail(entry), null, 12, true, scopeBadgeForEntry(entry),
 					() -> plugin.removeTileFromGroup(groupName, entry),
 					target -> plugin.moveTileToGroup(groupName, target, entry)));
 			}
@@ -330,112 +511,91 @@ public class BetterObjectHiderPanel extends PluginPanel
 		return sb.toString();
 	}
 
-	// --- widgets -------------------------------------------------------------------------
+	// --- drag and drop -------------------------------------------------------------------
 
-	private JPanel buildRow(String name, String detail, int indent, Runnable onRemove, Consumer<String> moveToGroup)
+	private enum ScopeBadge
 	{
-		final JPanel row = new JPanel(new BorderLayout());
-		row.setBorder(new EmptyBorder(4, 8 + indent, 4, 8));
-		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		row.setToolTipText("Drag onto a group header to move");
+		NONE("", ""),
+		INSTANCE("Instance", "Instance-scoped hide — applies only inside instanced areas using this map template"),
+		MIXED("Mixed", "This stack contains both instance-scoped and overworld hides; expand it to inspect each tile");
 
-		final JPanel text = new JPanel(new GridLayout(0, 1));
-		text.setOpaque(false);
+		private final String text;
+		private final String tooltip;
 
-		final JLabel nameLabel = new JLabel(name);
-		nameLabel.setForeground(Color.WHITE);
-		text.add(nameLabel);
-
-		if (detail != null)
+		ScopeBadge(String text, String tooltip)
 		{
-			final JLabel detailLabel = new JLabel(detail);
-			detailLabel.setFont(FontManager.getRunescapeSmallFont());
-			detailLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-			text.add(detailLabel);
+			this.text = text;
+			this.tooltip = tooltip;
 		}
-
-		row.add(text, BorderLayout.CENTER);
-		row.add(iconLabel(DELETE, DELETE_HOVER, "Unhide", onRemove), BorderLayout.EAST);
-
-		// Drag from anywhere on the row (except the delete icon, which owns its
-		// own listener) onto another group's header to move the entry there.
-		final MouseAdapter drag = new DragHandler(moveToGroup);
-		for (Component target : new Component[]{row, text, nameLabel})
-		{
-			target.addMouseListener(drag);
-			target.addMouseMotionListener(drag);
-		}
-		return row;
 	}
 
-	private final class DragHandler extends MouseAdapter
+	private static ScopeBadge scopeBadgeForEntry(String entry)
+	{
+		return BetterObjectHiderPlugin.isInstanceEntry(entry) ? ScopeBadge.INSTANCE : ScopeBadge.NONE;
+	}
+
+	private static ScopeBadge scopeBadgeForEntries(List<String> entries)
+	{
+		boolean hasInstance = false;
+		boolean hasOverworld = false;
+		for (String entry : entries)
+		{
+			if (BetterObjectHiderPlugin.isInstanceEntry(entry))
+			{
+				hasInstance = true;
+			}
+			else
+			{
+				hasOverworld = true;
+			}
+		}
+		if (hasInstance && hasOverworld)
+		{
+			return ScopeBadge.MIXED;
+		}
+		return hasInstance ? ScopeBadge.INSTANCE : ScopeBadge.NONE;
+	}
+
+	private static final class DragPayload
 	{
 		private final Consumer<String> moveToGroup;
-		private Point pressPoint;
 
-		private DragHandler(Consumer<String> moveToGroup)
+		private DragPayload(Consumer<String> moveToGroup)
 		{
 			this.moveToGroup = moveToGroup;
 		}
-
-		@Override
-		public void mousePressed(MouseEvent e)
-		{
-			pressPoint = e.getPoint();
-		}
-
-		@Override
-		public void mouseDragged(MouseEvent e)
-		{
-			if (pressPoint == null)
-			{
-				return;
-			}
-			if (!dragging && e.getPoint().distance(pressPoint) > 5)
-			{
-				dragging = true;
-				setCursor(Cursor.getPredefinedCursor(Cursor.MOVE_CURSOR));
-			}
-			if (dragging)
-			{
-				highlightHeader(headerAt(toListPanel(e)));
-			}
-		}
-
-		@Override
-		public void mouseReleased(MouseEvent e)
-		{
-			if (dragging)
-			{
-				final JPanel header = headerAt(toListPanel(e));
-				highlightHeader(null);
-				setCursor(Cursor.getDefaultCursor());
-				dragging = false;
-				if (header != null)
-				{
-					final String target = (String) header.getClientProperty("bohGroupName");
-					moveToGroup.accept(target);
-				}
-			}
-			pressPoint = null;
-		}
-
-		private Point toListPanel(MouseEvent e)
-		{
-			return SwingUtilities.convertPoint((Component) e.getSource(), e.getPoint(), listPanel);
-		}
 	}
 
-	private JPanel headerAt(Point listPanelPoint)
+	private static final class PayloadTransferable implements Transferable
 	{
-		for (JPanel header : headerPanels)
+		private final DragPayload payload;
+
+		private PayloadTransferable(DragPayload payload)
 		{
-			if (header.getBounds().contains(listPanelPoint))
-			{
-				return header;
-			}
+			this.payload = payload;
 		}
-		return null;
+
+		@Override
+		public DataFlavor[] getTransferDataFlavors()
+		{
+			return new DataFlavor[]{DRAG_FLAVOR};
+		}
+
+		@Override
+		public boolean isDataFlavorSupported(DataFlavor flavor)
+		{
+			return DRAG_FLAVOR.equals(flavor);
+		}
+
+		@Override
+		public Object getTransferData(DataFlavor flavor) throws UnsupportedFlavorException
+		{
+			if (!DRAG_FLAVOR.equals(flavor))
+			{
+				throw new UnsupportedFlavorException(flavor);
+			}
+			return payload;
+		}
 	}
 
 	private void highlightHeader(JPanel header)
@@ -455,9 +615,117 @@ public class BetterObjectHiderPanel extends PluginPanel
 		}
 	}
 
+	// --- widgets -------------------------------------------------------------------------
+
+	private JPanel buildRow(String name, String detail, int indent, boolean subRow,
+		Runnable onRemove, Consumer<String> moveToGroup)
+	{
+		return buildRow(name, detail, indent, subRow, ScopeBadge.NONE, onRemove, moveToGroup);
+	}
+
+	private JPanel buildRow(String name, String detail, int indent, boolean subRow, ScopeBadge scopeBadge,
+		Runnable onRemove, Consumer<String> moveToGroup)
+	{
+		final JPanel row = new JPanel(new BorderLayout());
+		row.setBorder(new EmptyBorder(4, 8 + indent, 4, 8));
+		row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+		row.setToolTipText("Drag onto a group header to move");
+
+		final JPanel text = new JPanel();
+		text.setLayout(new BoxLayout(text, BoxLayout.Y_AXIS));
+		text.setOpaque(false);
+
+		final JLabel nameLabel = new JLabel(name);
+		if (subRow)
+		{
+			// Sub-rows under a ×N stack: visually subordinate to primary rows
+			nameLabel.setFont(FontManager.getRunescapeSmallFont());
+			nameLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		}
+		else
+		{
+			nameLabel.setForeground(Color.WHITE);
+		}
+
+		final JPanel nameLine = new JPanel();
+		nameLine.setLayout(new BoxLayout(nameLine, BoxLayout.X_AXIS));
+		nameLine.setOpaque(false);
+		nameLine.setAlignmentX(LEFT_ALIGNMENT);
+		nameLine.add(nameLabel);
+		if (scopeBadge != ScopeBadge.NONE)
+		{
+			nameLine.add(Box.createRigidArea(new Dimension(6, 0)));
+			nameLine.add(scopeBadgeLabel(scopeBadge));
+		}
+		text.add(nameLine);
+
+		if (detail != null)
+		{
+			final JLabel detailLabel = new JLabel(detail);
+			detailLabel.setFont(FontManager.getRunescapeSmallFont());
+			detailLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+			detailLabel.setAlignmentX(LEFT_ALIGNMENT);
+			text.add(detailLabel);
+		}
+
+		row.add(text, BorderLayout.CENTER);
+		row.add(iconLabel(DELETE, DELETE_HOVER, "Unhide", onRemove), BorderLayout.EAST);
+
+		// Native Swing DnD: the platform runs the drag loop, so delivery is
+		// reliable regardless of which child component is under the press.
+		final DragPayload payload = new DragPayload(moveToGroup);
+		row.setTransferHandler(new TransferHandler()
+		{
+			@Override
+			public int getSourceActions(JComponent c)
+			{
+				return MOVE;
+			}
+
+			@Override
+			protected Transferable createTransferable(JComponent c)
+			{
+				return new PayloadTransferable(payload);
+			}
+
+			@Override
+			protected void exportDone(JComponent source, Transferable data, int action)
+			{
+				// Runs whether the drop landed or was cancelled
+				highlightHeader(null);
+			}
+		});
+		row.addMouseMotionListener(new MouseAdapter()
+		{
+			@Override
+			public void mouseDragged(MouseEvent e)
+			{
+				// No-op if a drag is already in progress
+				row.getTransferHandler().exportAsDrag(row, e, TransferHandler.MOVE);
+			}
+		});
+		return row;
+	}
+
+	private static JLabel scopeBadgeLabel(ScopeBadge scopeBadge)
+	{
+		final JLabel label = new JLabel(scopeBadge.text);
+		label.setOpaque(true);
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(scopeBadge == ScopeBadge.INSTANCE ? Color.BLACK : Color.WHITE);
+		label.setBackground(scopeBadge == ScopeBadge.INSTANCE
+			? ColorScheme.BRAND_ORANGE
+			: ColorScheme.MEDIUM_GRAY_COLOR);
+		label.setBorder(new EmptyBorder(1, 4, 1, 4));
+		label.setToolTipText(scopeBadge.tooltip);
+		return label;
+	}
+
 	private static JLabel iconLabel(ImageIcon icon, ImageIcon hoverIcon, String tooltip, Runnable onClick)
 	{
 		final JLabel label = new JLabel(icon);
+		// Centered so GridLayout cells space the header controls evenly
+		label.setHorizontalAlignment(JLabel.CENTER);
 		label.setToolTipText(tooltip);
 		label.setBorder(new EmptyBorder(0, 4, 0, 4));
 		label.addMouseListener(new MouseAdapter()
@@ -491,5 +759,22 @@ public class BetterObjectHiderPanel extends PluginPanel
 		{
 			plugin.createGroup(name);
 		}
+	}
+
+	private void promptRename(String oldName)
+	{
+		final String newName = (String) JOptionPane.showInputDialog(this, "Rename group:",
+			"Rename group", JOptionPane.PLAIN_MESSAGE, null, null, oldName);
+		if (newName == null || newName.trim().isEmpty() || newName.trim().equals(oldName))
+		{
+			return;
+		}
+		// Carry the collapse state over to the new name
+		final Boolean expanded = expandedState.remove(oldName);
+		if (expanded != null)
+		{
+			expandedState.put(newName.trim(), expanded);
+		}
+		plugin.renameGroup(oldName, newName);
 	}
 }
