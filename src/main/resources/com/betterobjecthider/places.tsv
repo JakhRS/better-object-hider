@@ -1,0 +1,9 @@
+# Curated fine-grained place names — spots the region->name table (area_names.tsv)
+# is too coarse on or misses entirely. Factual OSRS geography, authored for this
+# plugin from known coordinates; no runtime fetch, no dependency.
+#
+# Format: minX<TAB>minY<TAB>maxX<TAB>maxY<TAB>name (world coords, bounds inclusive,
+# plane-agnostic). First match wins — keep most-specific rows first, and keep this
+# file modest so hub review stays easy.
+1856	5696	1983	5823	Player-owned House
+3776	9856	3839	9919	The Nightmare

@@ -6,11 +6,11 @@
  */
 package com.betterobjecthider.ui;
 
-import com.betterobjecthider.AreaNames;
 import com.betterobjecthider.BetterObjectHiderPlugin;
+import com.betterobjecthider.EntryFilter;
 import com.betterobjecthider.HideEntry;
 import com.betterobjecthider.HideGroup;
-import com.betterobjecthider.HideScope;
+import com.betterobjecthider.LocationLabel;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -39,10 +39,12 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.TransferHandler;
 import javax.swing.border.EmptyBorder;
-import net.runelite.api.coords.WorldPoint;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.ui.components.IconTextField;
 import net.runelite.client.ui.components.PluginErrorPanel;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.LinkBrowser;
@@ -122,6 +124,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private final BetterObjectHiderPlugin plugin;
 	private final JPanel listPanel = new JPanel(new GridBagLayout());
 	private final PluginErrorPanel emptyPanel = new PluginErrorPanel();
+	private final IconTextField searchBar = new IconTextField();
 	// Survives rebuild(): expanded/collapsed per group name (default expanded)
 	private final Map<String, Boolean> expandedState = new HashMap<>();
 
@@ -155,21 +158,45 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		final JButton importButton = new JButton("Import");
 		importButton.setToolTipText("Import a hide group from the clipboard");
-		importButton.addActionListener(e ->
-		{
-			final BetterObjectHiderPlugin.ImportResult result = plugin.importGroupFromClipboard();
-			JOptionPane.showMessageDialog(this, result.message, "Import hide group",
-				result.success ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.ERROR_MESSAGE);
-		});
+		importButton.addActionListener(e -> promptImport());
 
 		final JPanel buttons = new JPanel(new GridLayout(1, 2, 6, 0));
 		buttons.add(newGroupButton);
 		buttons.add(importButton);
 
+		searchBar.setIcon(IconTextField.Icon.SEARCH);
+		searchBar.setPreferredSize(new Dimension(PluginPanel.PANEL_WIDTH - 20, 30));
+		searchBar.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		searchBar.setHoverBackgroundColor(ColorScheme.DARK_GRAY_HOVER_COLOR);
+		searchBar.setToolTipText("<html>Filter hidden objects; * matches anything.<br>"
+			+ "Prefixes: <b>area:</b>name, <b>group:</b>name,<br>"
+			+ "<b>scope:</b>tile/area/everywhere, <b>is:</b>instance</html>");
+		searchBar.getDocument().addDocumentListener(new DocumentListener()
+		{
+			@Override
+			public void insertUpdate(DocumentEvent e)
+			{
+				rebuild();
+			}
+
+			@Override
+			public void removeUpdate(DocumentEvent e)
+			{
+				rebuild();
+			}
+
+			@Override
+			public void changedUpdate(DocumentEvent e)
+			{
+				rebuild();
+			}
+		});
+
 		final JPanel northPanel = new JPanel(new BorderLayout(0, 8));
 		northPanel.setBorder(new EmptyBorder(1, 0, 10, 0));
 		northPanel.add(titleRow, BorderLayout.NORTH);
 		northPanel.add(buttons, BorderLayout.CENTER);
+		northPanel.add(searchBar, BorderLayout.SOUTH);
 
 		emptyPanel.setContent("No hidden objects",
 			"Shift+right-click a named object to hide it.");
@@ -195,6 +222,8 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		final List<HideGroup> groups = plugin.getGroupsSnapshot();
 		final String activeName = plugin.getActiveGroupName();
+		final EntryFilter filter = EntryFilter.parse(searchBar.getText());
+		final boolean filtering = !filter.isEmpty();
 
 		int totalEntries = 0;
 		for (final HideGroup group : groups)
@@ -222,24 +251,39 @@ public class BetterObjectHiderPanel extends PluginPanel
 			c.gridy++;
 		}
 
+		boolean anyShown = false;
 		if (!pristine)
 		{
 			for (final HideGroup group : groups)
 			{
-				final boolean expanded = expandedState.getOrDefault(group.getName(), true);
+				final List<JPanel> rows = buildGroupRows(group, filter);
+				// A filter narrows the panel to matching rows; groups with none vanish
+				if (filtering && rows.isEmpty())
+				{
+					continue;
+				}
+				anyShown = true;
+				final boolean expanded = filtering || expandedState.getOrDefault(group.getName(), true);
+				final int total = group.getEntries().size();
+				final String countLabel = filtering ? rows.size() + " of " + total : String.valueOf(total);
 
-				listPanel.add(buildGroupHeader(group, group.getName().equals(activeName), expanded), c);
+				listPanel.add(buildGroupHeader(group, group.getName().equals(activeName), expanded, countLabel), c);
 				c.gridy++;
 
 				if (expanded)
 				{
-					for (final JPanel row : buildGroupRows(group))
+					for (final JPanel row : rows)
 					{
 						listPanel.add(row, c);
 						c.gridy++;
 					}
 				}
 				listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
+				c.gridy++;
+			}
+			if (filtering && !anyShown)
+			{
+				listPanel.add(buildNoMatches(), c);
 				c.gridy++;
 			}
 		}
@@ -249,6 +293,38 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		revalidate();
 		repaint();
+	}
+
+	private JPanel buildNoMatches()
+	{
+		final JPanel box = new JPanel(new BorderLayout());
+		box.setBorder(new EmptyBorder(6, 8, 6, 8));
+		box.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		final JLabel label = new JLabel("No hidden objects match the search.");
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		box.add(label, BorderLayout.CENTER);
+		return box;
+	}
+
+	private void promptImport()
+	{
+		final BetterObjectHiderPlugin.ImportPreview preview = plugin.previewImportFromClipboard();
+		if (preview.error != null)
+		{
+			JOptionPane.showMessageDialog(this, preview.error, "Import hide group",
+				JOptionPane.ERROR_MESSAGE);
+			return;
+		}
+		final int count = preview.group.getEntries().size();
+		final int confirm = JOptionPane.showConfirmDialog(this,
+			"Import \"" + preview.group.getName() + "\" (" + count
+				+ (count == 1 ? " hidden object" : " hidden objects") + ")?",
+			"Import hide group", JOptionPane.OK_CANCEL_OPTION);
+		if (confirm == JOptionPane.OK_OPTION)
+		{
+			plugin.commitImport(preview.group);
+		}
 	}
 
 	private JPanel buildHelpBox()
@@ -286,7 +362,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 	// --- group header ------------------------------------------------------------------
 
-	private JPanel buildGroupHeader(HideGroup group, boolean active, boolean expanded)
+	private JPanel buildGroupHeader(HideGroup group, boolean active, boolean expanded, String countLabel)
 	{
 		final String name = group.getName();
 		final int count = group.getEntries().size();
@@ -328,7 +404,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 			}
 		});
 
-		final JLabel nameLabel = new JLabel(name + " (" + count + ")");
+		final JLabel nameLabel = new JLabel(name + " (" + countLabel + ")");
 		// Defense in depth: never interpret an (untrusted) group name as HTML
 		nameLabel.putClientProperty("html.disable", Boolean.TRUE);
 		nameLabel.setIcon(expanded ? CHEVRON_DOWN : CHEVRON_RIGHT);
@@ -411,7 +487,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 	// --- group body --------------------------------------------------------------------
 
-	private List<JPanel> buildGroupRows(HideGroup group)
+	private List<JPanel> buildGroupRows(HideGroup group, EntryFilter filter)
 	{
 		final List<JPanel> rows = new ArrayList<>();
 		final String groupName = group.getName();
@@ -421,12 +497,19 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		for (final HideEntry entry : entries)
 		{
-			rows.add(buildRow(entry.getObjectName(), detailFor(entry), entry.isInstance(),
+			// The location label doubles as the area: filter value, so searching
+			// matches exactly what the row displays
+			final String detail = LocationLabel.describe(entry);
+			if (!filter.isEmpty() && !filter.matches(entry, groupName, detail))
+			{
+				continue;
+			}
+			rows.add(buildRow(entry.getObjectName(), detail, entry.isInstance(),
 				() -> plugin.removeEntry(groupName, entry),
 				target -> plugin.moveEntry(groupName, target, entry)));
 		}
 
-		if (rows.isEmpty())
+		if (rows.isEmpty() && filter.isEmpty())
 		{
 			final JPanel empty = new JPanel(new BorderLayout());
 			empty.setBorder(new EmptyBorder(4, 8, 4, 8));
@@ -438,40 +521,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 			rows.add(empty);
 		}
 		return rows;
-	}
-
-	private static String detailFor(HideEntry entry)
-	{
-		if (entry.getScope() == HideScope.GLOBAL)
-		{
-			return "Everywhere";
-		}
-		// Prefer a readable place name (e.g. "Tzhaar Fight Caves"); this also
-		// names instances correctly since entries store the template region.
-		final String area = AreaNames.get(entry.getRegionId());
-		if (entry.getScope() == HideScope.AREA)
-		{
-			if (area != null)
-			{
-				return "All of " + area;
-			}
-			// Region ID → its south-west corner, a recognizable landmark coordinate
-			final int rx = (entry.getRegionId() >>> 8) << 6;
-			final int ry = (entry.getRegionId() & 0xff) << 6;
-			return "This whole area (near " + rx + ", " + ry + ")";
-		}
-		if (area != null)
-		{
-			return area;
-		}
-		final WorldPoint wp = WorldPoint.fromRegion(
-			entry.getRegionId(), entry.getRegionX(), entry.getRegionY(), entry.getPlane());
-		final StringBuilder sb = new StringBuilder("Tile ").append(wp.getX()).append(", ").append(wp.getY());
-		if (entry.getPlane() != 0)
-		{
-			sb.append(", plane ").append(entry.getPlane());
-		}
-		return sb.toString();
 	}
 
 	// --- drag and drop -------------------------------------------------------------------
@@ -670,12 +719,16 @@ public class BetterObjectHiderPanel extends PluginPanel
 		{
 			return;
 		}
-		// Carry the collapse state over to the new name
-		final Boolean expanded = expandedState.remove(oldName);
-		if (expanded != null)
+		// Carry the collapse state over to whatever name the plugin settled on —
+		// it may sanitize, truncate, or uniquify the requested one
+		final String finalName = plugin.renameGroup(oldName, newName);
+		if (finalName != null)
 		{
-			expandedState.put(newName.trim(), expanded);
+			final Boolean expanded = expandedState.remove(oldName);
+			if (expanded != null)
+			{
+				expandedState.put(finalName, expanded);
+			}
 		}
-		plugin.renameGroup(oldName, newName);
 	}
 }

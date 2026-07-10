@@ -1,0 +1,21 @@
+# Coarse province boxes for the parenthesised context in "Place (Province)" labels.
+# Factual OSRS geography, approximate near borders by design (see CLAUDE.md).
+#
+# Format: minX<TAB>minY<TAB>maxX<TAB>maxY<TAB>name (world coords, bounds inclusive).
+# First match wins — order matters where boxes overlap (e.g. Wilderness before
+# Asgarnia's northern strip, the Al Kharid strip before Misthalin).
+2944	3520	3391	3967	The Wilderness
+3520	3712	3839	3967	Fossil Island
+3392	3136	3839	3519	Morytania
+3264	3136	3391	3339	Kharidian Desert
+3136	2496	3551	3135	Kharidian Desert
+2688	2816	3007	3235	Karamja
+3072	3136	3391	3519	Misthalin
+2880	3136	3071	3555	Asgarnia
+2816	3556	2943	3967	Troll Country
+2368	2816	2815	3039	Feldip Hills
+2112	3008	2367	3519	Tirannwn
+2368	3040	2943	3519	Kandarin
+2048	3520	2815	3967	Fremennik Province
+1024	2688	2111	3391	Varlamore
+1024	3392	2047	4159	Kourend

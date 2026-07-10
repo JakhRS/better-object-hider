@@ -39,6 +39,18 @@ public interface BetterObjectHiderConfig extends Config
 
 	@ConfigItem(
 		position = 2,
+		keyName = "menuReach",
+		name = "Hide menu options",
+		description = "Which hide reaches the right-click menu offers. Trims menu clutter only — "
+			+ "existing hides keep working and Unhide options always appear."
+	)
+	default MenuReach menuReach()
+	{
+		return MenuReach.ALL;
+	}
+
+	@ConfigItem(
+		position = 3,
 		keyName = "showHelp",
 		name = "Show usage help",
 		description = "Show the short how-to box at the top of the side panel"
@@ -51,7 +63,7 @@ public interface BetterObjectHiderConfig extends Config
 	@Range(max = 10080)
 	@Units(Units.MINUTES)
 	@ConfigItem(
-		position = 3,
+		position = 4,
 		keyName = "activeGroupTimeoutMinutes",
 		name = "Active group timeout",
 		description = "If the active group hasn't been used for this long, new hides go back to the Default group "

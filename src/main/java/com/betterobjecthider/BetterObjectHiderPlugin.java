@@ -28,8 +28,10 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.inject.Inject;
@@ -86,6 +88,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	private static final String GROUPS_KEY = "groupsV2";
 	private static final String ACTIVE_KEY = "activeGroup";
 	private static final String LAST_USE_KEY = "activeGroupLastUse";
+
+	// Bounds on clipboard imports (untrusted input). Loading an existing config
+	// is intentionally uncapped — a profile that already holds more must keep working.
+	static final int MAX_IMPORT_CHARS = 262_144;
+	static final int MAX_IMPORT_ENTRIES = 2_000;
 
 	// Colour-coded by reach (a traffic-light ladder): green = this one tile,
 	// amber = this map area, red = everywhere. Every option is by object name.
@@ -147,11 +154,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	private final List<HideGroup> groups = new ArrayList<>();
 	private String activeGroupName = DEFAULT_GROUP_NAME;
 
-	// Derived render state: scene-space "id:x:y:plane" positions of objects that
+	// Derived render state: packed id+position keys (see tileKey) of objects that
 	// should currently be suppressed. Names are resolved on the client thread
 	// (see rebuildHiddenPositions); drawObject on the maploader thread only does
 	// a cheap position lookup. Concurrent because drawObject reads it off-thread.
-	private final Set<String> hiddenPositions = ConcurrentHashMap.newKeySet();
+	private final Set<Long> hiddenPositions = ConcurrentHashMap.newKeySet();
 
 	// Snapshot of the enabled-group hides + their names, recomputed on every
 	// config change. Read (without locking) by the scene scan and by the object
@@ -205,7 +212,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		navigationButton = null;
 		pluginPanel = null;
 
-		final Set<String> restore = new HashSet<>(hiddenPositions);
+		final Set<Long> restore = new HashSet<>(hiddenPositions);
 		synchronized (this)
 		{
 			groups.clear();
@@ -339,7 +346,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			rebuildPanel();
 			return;
 		}
-		final Set<String> union = new HashSet<>(hiddenPositions);
+		final Set<Long> union = new HashSet<>(hiddenPositions);
 		rebuildHiddenPositions();
 		union.addAll(hiddenPositions);
 		invalidateZones(union);
@@ -369,6 +376,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			return;
 		}
 
+		// Scenes repeat object ids heavily (every "Tree" is the same few ids), so
+		// resolve each id once per walk. Unnamed ids cache null.
+		final Map<Integer, String> nameCache = new HashMap<>();
+
 		final Scene scene = wv.getScene();
 		for (Tile[][] plane : scene.getTiles())
 		{
@@ -390,14 +401,24 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 					}
 					for (TileObject obj : tileObjects(tile))
 					{
-						final String name = resolveName(obj.getId());
+						final int id = obj.getId();
+						final String name;
+						if (nameCache.containsKey(id))
+						{
+							name = nameCache.get(id);
+						}
+						else
+						{
+							name = resolveName(id);
+							nameCache.put(id, name);
+						}
 						if (name == null || !names.contains(name))
 						{
 							continue;
 						}
 						if (matchesAny(effective, obj, name))
 						{
-							hiddenPositions.add(tileKey(obj.getId(), obj.getWorldLocation()));
+							hiddenPositions.add(tileKey(id, obj.getWorldLocation()));
 						}
 					}
 				}
@@ -421,7 +442,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 		final Scene scene = wv.getScene();
 
-		final Set<Integer> covered = new HashSet<>();
+		// Dedupe on id+tile (not bare id) so two same-id objects under the cursor
+		// each get their own correctly-targeted options; dedupe the HideEntry
+		// options themselves so same-name neighbours don't repeat area/global rows.
+		final Set<Long> covered = new HashSet<>();
+		final Set<HideEntry> offered = new HashSet<>();
 		for (MenuEntry entry : event.getMenuEntries())
 		{
 			if (entry.getType() != MenuAction.EXAMINE_OBJECT)
@@ -429,9 +454,9 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 				continue;
 			}
 			final TileObject obj = findTileObject(scene, wv.getPlane(), entry.getParam0(), entry.getParam1(), entry.getIdentifier());
-			if (obj != null && covered.add(obj.getId()))
+			if (obj != null && covered.add(tileKey(obj.getId(), obj.getWorldLocation())))
 			{
-				addMenuEntries(obj, entry.getTarget());
+				addMenuEntries(obj, entry.getTarget(), offered);
 			}
 		}
 
@@ -444,19 +469,19 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 		for (TileObject obj : tileObjects(tile))
 		{
-			if (obj instanceof GameObject || !covered.add(obj.getId()))
+			if (obj instanceof GameObject || !covered.add(tileKey(obj.getId(), obj.getWorldLocation())))
 			{
 				continue;
 			}
 			final String name = resolveName(obj.getId());
 			if (name != null)
 			{
-				addMenuEntries(obj, "<col=ffff>" + name + "</col>");
+				addMenuEntries(obj, "<col=ffff>" + name + "</col>", offered);
 			}
 		}
 	}
 
-	private void addMenuEntries(TileObject obj, String target)
+	private void addMenuEntries(TileObject obj, String target, Set<HideEntry> offered)
 	{
 		final String name = resolveName(obj.getId());
 		// The compliance gate: unnamed objects can never be hidden, and a hardcoded
@@ -473,20 +498,29 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 
 		if (config.revealAll())
 		{
-			// Narrowest reach first, so the closest-matching Unhide is on top
-			addUnhide(tileEntry, UNHIDE_ONE, target);
-			addUnhide(areaEntry, UNHIDE_AREA, target);
-			addUnhide(globalEntry, UNHIDE_ALL, target);
+			// Narrowest reach first, so the closest-matching Unhide is on top.
+			// Unhide ignores the menu-reach trim: an existing hide must always
+			// be removable in-world, whatever reaches the user offers for hiding.
+			addUnhide(tileEntry, UNHIDE_ONE, target, offered);
+			addUnhide(areaEntry, UNHIDE_AREA, target, offered);
+			addUnhide(globalEntry, UNHIDE_ALL, target, offered);
 			return;
 		}
-		addHideOption(tileEntry, HIDE_ONE, target);
-		addHideOption(areaEntry, HIDE_AREA, target);
-		addHideOption(globalEntry, HIDE_ALL, target);
+		final MenuReach reach = config.menuReach();
+		addHideOption(tileEntry, HIDE_ONE, target, offered);
+		if (reach != MenuReach.TILE_ONLY)
+		{
+			addHideOption(areaEntry, HIDE_AREA, target, offered);
+		}
+		if (reach == MenuReach.ALL)
+		{
+			addHideOption(globalEntry, HIDE_ALL, target, offered);
+		}
 	}
 
-	private void addHideOption(HideEntry entry, String option, String target)
+	private void addHideOption(HideEntry entry, String option, String target, Set<HideEntry> offered)
 	{
-		if (!anyGroupContains(entry))
+		if (!anyGroupContains(entry) && offered.add(entry))
 		{
 			client.getMenu().createMenuEntry(-1)
 				.setOption(option)
@@ -496,9 +530,9 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 	}
 
-	private void addUnhide(HideEntry entry, String option, String target)
+	private void addUnhide(HideEntry entry, String option, String target, Set<HideEntry> offered)
 	{
-		if (anyGroupContains(entry))
+		if (anyGroupContains(entry) && offered.add(entry))
 		{
 			client.getMenu().createMenuEntry(-1)
 				.setOption(option)
@@ -704,26 +738,32 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		saveToConfig();
 	}
 
-	/** Renames a group. The Default group keeps its name — it anchors the timeout fallback. */
-	public void renameGroup(String oldName, String newName)
+	/**
+	 * Renames a group. The Default group keeps its name — it anchors the timeout
+	 * fallback.
+	 *
+	 * @return the final name (possibly sanitized/uniquified), or null if nothing changed
+	 */
+	public String renameGroup(String oldName, String newName)
 	{
+		final String name;
 		synchronized (this)
 		{
 			if (DEFAULT_GROUP_NAME.equals(oldName))
 			{
-				return;
+				return null;
 			}
 			final HideGroup group = findGroup(groups, oldName);
 			if (group == null)
 			{
-				return;
+				return null;
 			}
 			final Set<String> taken = existingNames(groups);
 			taken.remove(oldName);
-			final String name = uniqueName(sanitizeName(newName), taken);
+			name = uniqueName(sanitizeName(newName), taken);
 			if (name.equals(oldName))
 			{
-				return;
+				return null;
 			}
 			group.setName(name);
 			if (activeGroupName.equals(oldName))
@@ -732,6 +772,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			}
 		}
 		saveToConfig();
+		return name;
 	}
 
 	public void setGroupEnabled(String name, boolean enabled)
@@ -901,8 +942,25 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return message;
 	}
 
-	/** Imports a group from clipboard JSON, sanitized defensively (imported data is untrusted). */
-	public ImportResult importGroupFromClipboard()
+	/** A parsed, sanitized clipboard group awaiting the user's confirmation. */
+	public static final class ImportPreview
+	{
+		/** Ready-to-commit group, or null when {@link #error} is set. */
+		public final HideGroup group;
+		public final String error;
+
+		ImportPreview(HideGroup group, String error)
+		{
+			this.group = group;
+			this.error = error;
+		}
+	}
+
+	/**
+	 * Reads and sanitizes a hide group from the clipboard without adding it, so
+	 * the panel can show a confirmation first (imported data is untrusted).
+	 */
+	public ImportPreview previewImportFromClipboard()
 	{
 		final String text;
 		try
@@ -911,7 +969,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		}
 		catch (IOException | UnsupportedFlavorException ex)
 		{
-			return new ImportResult(false, "Unable to read the system clipboard.");
+			return new ImportPreview(null, "Unable to read the system clipboard.");
+		}
+		if (text.length() > MAX_IMPORT_CHARS)
+		{
+			return new ImportPreview(null, "The clipboard content is too large to be a hide group.");
 		}
 
 		HideGroup imported;
@@ -922,15 +984,24 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		catch (JsonSyntaxException ex)
 		{
 			log.debug("malformed import", ex);
-			return new ImportResult(false, "The clipboard does not contain a valid hide group.");
+			return new ImportPreview(null, "The clipboard does not contain a valid hide group.");
 		}
 
 		imported = sanitizeGroup(imported, bannedNames);
 		if (imported == null || imported.getEntries().isEmpty())
 		{
-			return new ImportResult(false, "The clipboard does not contain a valid hide group.");
+			return new ImportPreview(null, "The clipboard does not contain a valid hide group.");
 		}
+		if (imported.getEntries().size() > MAX_IMPORT_ENTRIES)
+		{
+			return new ImportPreview(null, "The hide group has too many objects (limit " + MAX_IMPORT_ENTRIES + ").");
+		}
+		return new ImportPreview(imported, null);
+	}
 
+	/** Adds a previewed group after the user confirmed the import. */
+	public ImportResult commitImport(HideGroup imported)
+	{
 		final String name;
 		final int count = imported.getEntries().size();
 		synchronized (this)
@@ -1013,22 +1084,62 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 				}
 				final String name = cleanName(e.getObjectName());
 				// scope == null means a pre-scope legacy record: drop it (clean break)
-				if (name == null || e.getScope() == null || bannedNames.contains(name) || e.getRegionId() < 0)
+				if (name == null || e.getScope() == null || bannedNames.contains(name))
 				{
 					continue;
 				}
-				final HideEntry clean = new HideEntry();
-				clean.setObjectName(name);
-				clean.setScope(e.getScope());
+				final HideEntry clean = normalizeEntry(name, e);
+				if (clean != null)
+				{
+					out.getEntries().add(clean);
+				}
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Rebuilds an entry keeping only the fields its scope actually uses, zeroing
+	 * the rest. Equality is over all fields (Lombok {@code @Data}), so junk in
+	 * unused fields would otherwise defeat de-duplication, the Unhide menu test,
+	 * and removal-by-equality. Menu-built entries are already in this form.
+	 *
+	 * @return the normalized entry, or null when a used field is out of range
+	 */
+	static HideEntry normalizeEntry(String name, HideEntry e)
+	{
+		final HideEntry clean = new HideEntry();
+		clean.setObjectName(name);
+		clean.setScope(e.getScope());
+		switch (e.getScope())
+		{
+			case GLOBAL:
+				break;
+			case AREA:
+				if (e.getRegionId() < 0 || e.getRegionId() > 0xffff)
+				{
+					return null;
+				}
+				clean.setRegionId(e.getRegionId());
+				clean.setInstance(e.isInstance());
+				break;
+			case TILE:
+			default:
+				if (e.getRegionId() < 0 || e.getRegionId() > 0xffff
+					|| e.getRegionX() < 0 || e.getRegionX() >= Constants.REGION_SIZE
+					|| e.getRegionY() < 0 || e.getRegionY() >= Constants.REGION_SIZE
+					|| e.getPlane() < 0 || e.getPlane() >= Constants.MAX_Z)
+				{
+					return null;
+				}
 				clean.setRegionId(e.getRegionId());
 				clean.setRegionX(e.getRegionX());
 				clean.setRegionY(e.getRegionY());
 				clean.setPlane(e.getPlane());
 				clean.setInstance(e.isInstance());
-				out.getEntries().add(clean);
-			}
+				break;
 		}
-		return out;
+		return clean;
 	}
 
 	static String sanitizeName(String name)
@@ -1190,10 +1301,19 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return WorldPoint.fromLocalInstance(client, lp, wp.getPlane());
 	}
 
-	// Scene-space render-match key, in the object's world-location space
-	static String tileKey(int objectId, WorldPoint wp)
+	/**
+	 * Packed render-match key in the object's world-location space: object id in
+	 * bits 34+, plane in bits 32-33, then x and y as 16-bit fields (world coords
+	 * top out at 16383, so components can never bleed into each other). A long
+	 * instead of a string keeps {@link #drawObject} allocation-free during zone
+	 * uploads on the maploader thread.
+	 */
+	static long tileKey(int objectId, WorldPoint wp)
 	{
-		return objectId + ":" + wp.getX() + ":" + wp.getY() + ":" + wp.getPlane();
+		return ((long) objectId << 34)
+			| ((long) wp.getPlane() << 32)
+			| ((long) wp.getX() << 16)
+			| wp.getY();
 	}
 
 	private static TileObject findTileObject(Scene scene, int plane, int sceneX, int sceneY, int objectId)
@@ -1257,7 +1377,7 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	 * a matching object is found are touched — those are guaranteed initialized,
 	 * avoiding the {@code assert zone.initialized} crash.
 	 */
-	private void invalidateZones(Set<String> positions)
+	private void invalidateZones(Set<Long> positions)
 	{
 		if (positions.isEmpty() || client.getGameState() != GameState.LOGGED_IN)
 		{

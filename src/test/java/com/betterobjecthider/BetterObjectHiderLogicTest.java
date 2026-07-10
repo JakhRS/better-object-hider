@@ -13,6 +13,7 @@ import java.util.Set;
 import net.runelite.api.coords.WorldPoint;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import org.junit.Test;
@@ -45,10 +46,21 @@ public class BetterObjectHiderLogicTest
 	// --- render match key ---------------------------------------------------------------
 
 	@Test
-	public void tileKeyEncodesWorldPoint()
+	public void tileKeyIsStableAndCollisionFree()
 	{
 		final WorldPoint wp = new WorldPoint(3222, 3218, 0);
-		assertEquals("1276:3222:3218:0", BetterObjectHiderPlugin.tileKey(1276, wp));
+		assertEquals(BetterObjectHiderPlugin.tileKey(1276, wp), BetterObjectHiderPlugin.tileKey(1276, wp));
+
+		// Any differing component must produce a different key
+		final long base = BetterObjectHiderPlugin.tileKey(1276, wp);
+		assertNotEquals(base, BetterObjectHiderPlugin.tileKey(1277, wp));
+		assertNotEquals(base, BetterObjectHiderPlugin.tileKey(1276, new WorldPoint(3223, 3218, 0)));
+		assertNotEquals(base, BetterObjectHiderPlugin.tileKey(1276, new WorldPoint(3222, 3219, 0)));
+		assertNotEquals(base, BetterObjectHiderPlugin.tileKey(1276, new WorldPoint(3222, 3218, 1)));
+		// Adjacent-coordinate cross-talk (x borrowing into y's bits, etc.)
+		assertNotEquals(
+			BetterObjectHiderPlugin.tileKey(1276, new WorldPoint(3223, 3218, 0)),
+			BetterObjectHiderPlugin.tileKey(1276, new WorldPoint(3222, 3218 + (1 << 15), 0)));
 	}
 
 	// --- entry matching -----------------------------------------------------------------
@@ -218,6 +230,199 @@ public class BetterObjectHiderLogicTest
 		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired(String.valueOf(now - 999 * minute), now, 0));
 		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired("garbage", now, 60));
 		assertFalse(BetterObjectHiderPlugin.isActiveGroupExpired(null, now, 60));
+	}
+
+	// --- entry normalization --------------------------------------------------------------
+
+	@Test
+	public void sanitizeGroupNormalizesScopeIrrelevantFields()
+	{
+		// An imported GLOBAL/AREA entry with junk in unused fields must compare
+		// equal to the menu-built form, or unhide/de-dupe break silently
+		final HideEntry junkGlobal = new HideEntry();
+		junkGlobal.setObjectName("Tree");
+		junkGlobal.setScope(HideScope.GLOBAL);
+		junkGlobal.setRegionId(123);
+		junkGlobal.setRegionX(45);
+		junkGlobal.setRegionY(46);
+		junkGlobal.setPlane(2);
+		junkGlobal.setInstance(true);
+
+		final HideEntry junkArea = areaEntry("Rock", 12850, true);
+		junkArea.setRegionX(9);
+		junkArea.setRegionY(9);
+		junkArea.setPlane(3);
+
+		final HideGroup dirty = group("Mine", true);
+		dirty.getEntries().add(junkGlobal);
+		dirty.getEntries().add(junkArea);
+
+		final HideGroup clean = BetterObjectHiderPlugin.sanitizeGroup(dirty, Set.of());
+
+		final HideEntry expectedGlobal = new HideEntry();
+		expectedGlobal.setObjectName("Tree");
+		expectedGlobal.setScope(HideScope.GLOBAL);
+		final HideEntry expectedArea = areaEntry("Rock", 12850, true);
+		assertEquals(Set.of(expectedGlobal, expectedArea), clean.getEntries());
+	}
+
+	@Test
+	public void normalizeEntryRejectsOutOfRangeTiles()
+	{
+		assertNull(BetterObjectHiderPlugin.normalizeEntry("Tree", tileEntry("Tree", -1, 0, 0, 0, false)));
+		assertNull(BetterObjectHiderPlugin.normalizeEntry("Tree", tileEntry("Tree", 12850, 64, 0, 0, false)));
+		assertNull(BetterObjectHiderPlugin.normalizeEntry("Tree", tileEntry("Tree", 12850, 0, -1, 0, false)));
+		assertNull(BetterObjectHiderPlugin.normalizeEntry("Tree", tileEntry("Tree", 12850, 0, 0, 4, false)));
+		assertEquals(tileEntry("Tree", 12850, 63, 63, 3, true),
+			BetterObjectHiderPlugin.normalizeEntry("Tree", tileEntry("Tree", 12850, 63, 63, 3, true)));
+	}
+
+	// --- search filter --------------------------------------------------------------------
+
+	@Test
+	public void filterEmptyQueryMatchesEverything()
+	{
+		assertTrue(EntryFilter.parse(null).isEmpty());
+		assertTrue(EntryFilter.parse("   ").isEmpty());
+		assertTrue(EntryFilter.parse("").matches(tileEntry("Tree", 12850, 1, 1, 0, false), "Default", null));
+	}
+
+	@Test
+	public void filterPlainTermMatchesObjectName()
+	{
+		final EntryFilter filter = EntryFilter.parse("tree");
+		assertTrue(filter.matches(tileEntry("Yew tree", 12850, 1, 1, 0, false), "Default", null));
+		assertFalse(filter.matches(tileEntry("Rock", 12850, 1, 1, 0, false), "Default", null));
+	}
+
+	@Test
+	public void filterWildcardMatchesWholeValue()
+	{
+		assertTrue(EntryFilter.matchesValue("bank*", "Bank booth"));
+		assertTrue(EntryFilter.matchesValue("*booth", "Bank booth"));
+		assertTrue(EntryFilter.matchesValue("b*th", "Bank booth"));
+		assertFalse(EntryFilter.matchesValue("booth*", "Bank booth"));
+		// Regex metacharacters in the term are literal
+		assertFalse(EntryFilter.matchesValue("b.*h", "Bank booth"));
+		assertFalse(EntryFilter.matchesValue("tree*", null));
+	}
+
+	@Test
+	public void filterAreaTermMatchesLocationLabel()
+	{
+		final EntryFilter filter = EntryFilter.parse("area:kandarin");
+		final HideEntry tile = tileEntry("Tree", 9520, 30, 30, 0, false);
+		assertTrue(filter.matches(tile, "Default", "Castle Wars (Kandarin)"));
+		assertFalse(filter.matches(tile, "Default", "Lumbridge (Misthalin)"));
+		assertFalse(filter.matches(tile, "Default", null));
+
+		// Global hides apply everywhere, so they match any area term
+		final HideEntry global = new HideEntry();
+		global.setObjectName("Tree");
+		global.setScope(HideScope.GLOBAL);
+		assertTrue(filter.matches(global, "Default", null));
+	}
+
+	@Test
+	public void filterGroupScopeAndInstanceTerms()
+	{
+		final HideEntry instanced = areaEntry("Rock", 12850, true);
+		assertTrue(EntryFilter.parse("group:pvp").matches(instanced, "PvP worlds", null));
+		assertFalse(EntryFilter.parse("group:pvp").matches(instanced, "Default", null));
+		assertTrue(EntryFilter.parse("scope:area").matches(instanced, "Default", null));
+		assertFalse(EntryFilter.parse("scope:tile").matches(instanced, "Default", null));
+		assertTrue(EntryFilter.parse("is:instance").matches(instanced, "Default", null));
+		assertFalse(EntryFilter.parse("is:instance").matches(areaEntry("Rock", 12850, false), "Default", null));
+
+		final HideEntry global = new HideEntry();
+		global.setObjectName("Tree");
+		global.setScope(HideScope.GLOBAL);
+		assertTrue(EntryFilter.parse("scope:everywhere").matches(global, "Default", null));
+		assertTrue(EntryFilter.parse("scope:global").matches(global, "Default", null));
+	}
+
+	@Test
+	public void filterTermsAreAnded()
+	{
+		final EntryFilter filter = EntryFilter.parse("tree area:kandarin");
+		final HideEntry tile = tileEntry("Yew tree", 9520, 30, 30, 0, false);
+		assertTrue(filter.matches(tile, "Default", "Castle Wars (Kandarin)"));
+		assertFalse(filter.matches(tile, "Default", "Lumbridge (Misthalin)"));
+		assertFalse(filter.matches(tileEntry("Rock", 9520, 30, 30, 0, false), "Default", "Castle Wars (Kandarin)"));
+	}
+
+	@Test
+	public void filterUnknownPrefixIsAPlainNameTerm()
+	{
+		assertFalse(EntryFilter.parse("foo:bar").matches(tileEntry("Tree", 12850, 1, 1, 0, false), "Default", null));
+	}
+
+	// --- coordinate boxes -------------------------------------------------------------------
+
+	@Test
+	public void coordBoxParseToleratesJunk()
+	{
+		assertNull(CoordBoxes.parseLine(null));
+		assertNull(CoordBoxes.parseLine(""));
+		assertNull(CoordBoxes.parseLine("# comment"));
+		assertNull(CoordBoxes.parseLine("1\t2\t3"));
+		assertNull(CoordBoxes.parseLine("a\t2\t3\t4\tName"));
+		assertNull(CoordBoxes.parseLine("5\t2\t3\t4\tName")); // minX > maxX
+		assertNull(CoordBoxes.parseLine("1\t2\t3\t4\t "));
+
+		final CoordBoxes.Box box = CoordBoxes.parseLine("1\t2\t3\t4\tName");
+		assertEquals("Name", box.name);
+	}
+
+	@Test
+	public void coordBoxLookupIsInclusiveAndFirstMatchWins()
+	{
+		final List<CoordBoxes.Box> boxes = List.of(
+			CoordBoxes.parseLine("10\t10\t20\t20\tInner"),
+			CoordBoxes.parseLine("0\t0\t30\t30\tOuter"));
+		assertEquals("Inner", CoordBoxes.lookup(boxes, 10, 10)); // min edge
+		assertEquals("Inner", CoordBoxes.lookup(boxes, 20, 20)); // max edge
+		assertEquals("Inner", CoordBoxes.lookup(boxes, 15, 15));
+		assertEquals("Outer", CoordBoxes.lookup(boxes, 9, 15));
+		assertNull(CoordBoxes.lookup(boxes, 31, 15));
+	}
+
+	// --- location labels ----------------------------------------------------------------------
+
+	@Test
+	public void locationLabelCombinesPlaceAndProvince()
+	{
+		assertEquals("Castle Wars (Kandarin)", LocationLabel.combine("Castle Wars", "Kandarin"));
+		assertEquals("Castle Wars", LocationLabel.combine("Castle Wars", null));
+		assertEquals("Kandarin", LocationLabel.combine(null, "Kandarin"));
+		assertEquals("Kandarin", LocationLabel.combine("Kandarin", "Kandarin"));
+		assertNull(LocationLabel.combine(null, null));
+	}
+
+	@Test
+	public void locationLabelDescribesKnownPlaces()
+	{
+		// Castle Wars region 9520: place from the region table, province from the box
+		assertEquals("Castle Wars (Kandarin)",
+			LocationLabel.describe(tileEntry("Tree", 9520, 30, 30, 0, false)));
+		// Instanced template regions live off the overworld: place layer only
+		assertEquals("Player-owned House",
+			LocationLabel.describe(tileEntry("Chair", 7769, 10, 10, 0, true)));
+		assertEquals("All of Lumbridge (Misthalin)",
+			LocationLabel.describe(areaEntry("Tree", 12850, false)));
+	}
+
+	@Test
+	public void locationLabelFallsBackToCoordinates()
+	{
+		assertEquals("Tile 69, 70", LocationLabel.describe(tileEntry("Tree", 257, 5, 6, 0, false)));
+		assertEquals("Tile 69, 70, plane 2", LocationLabel.describe(tileEntry("Tree", 257, 5, 6, 2, false)));
+		assertEquals("This whole area (near 64, 64)", LocationLabel.describe(areaEntry("Tree", 257, false)));
+
+		final HideEntry global = new HideEntry();
+		global.setObjectName("Tree");
+		global.setScope(HideScope.GLOBAL);
+		assertEquals("Everywhere", LocationLabel.describe(global));
 	}
 
 	// --- helpers ------------------------------------------------------------------------
