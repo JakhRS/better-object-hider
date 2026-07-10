@@ -21,6 +21,8 @@ dependencies {
 	testImplementation 'junit:junit:4.13.2'
 	testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion
 	testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion
+	// Dev tooling only (dumpMapLabels task) — not a plugin dependency
+	testImplementation group: 'net.runelite', name: 'cache', version: runeLiteVersion
 }
 
 group = 'com.betterobjecthider'
@@ -40,4 +42,11 @@ tasks.register('run', JavaExec) {
 	mainClass = 'com.betterobjecthider.BetterObjectHiderPluginTest'
 	jvmArgs = ['-ea']
 	args = ['--developer-mode']
+}
+
+tasks.register('dumpMapLabels', JavaExec) {
+	group = 'runelite'
+	description = 'Regenerates map_labels.tsv from the local OSRS game cache (dev tool)'
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'com.betterobjecthider.devtools.MapLabelsDumper'
 }

@@ -8,16 +8,24 @@ package com.betterobjecthider;
 
 /**
  * Builds the human-readable location line for a hidden-object row: specific
- * place plus broad context, e.g. {@code Castle Wars (Kandarin)}. Three static
- * data layers, most-specific wins — curated {@link Places} boxes, then the
- * {@link AreaNames} region table, with {@link Provinces} supplying the
- * parenthesised context. Instances need no special path: entries store the
- * de-instanced template location, so the place layer yields the lair name
- * wherever the data covers it. Pure logic, unit-tested; keeps work off the EDT
- * panel code.
+ * place plus broad context, e.g. {@code Castle Wars (Kandarin)}. Static data
+ * layers, most-specific wins — curated {@link Places} boxes, then the nearest
+ * {@link MapLabels world-map label}, then the {@link AreaNames} region table,
+ * with {@link Provinces} supplying the parenthesised context. Instances need
+ * no special path: entries store the de-instanced template location, so the
+ * place layers yield the lair name wherever the data covers it. Pure logic,
+ * unit-tested; keeps work off the EDT panel code.
  */
 public final class LocationLabel
 {
+	/**
+	 * How far (in tiles, Chebyshev) a world-map label reaches. Tile hides use
+	 * the tight radius; area hides measure from the region centre, which can be
+	 * up to 32 tiles from any tile in the region, so they get a looser one.
+	 */
+	static final int LABEL_RADIUS_TILE = 24;
+	static final int LABEL_RADIUS_AREA = 32;
+
 	private LocationLabel()
 	{
 	}
@@ -38,6 +46,10 @@ public final class LocationLabel
 		final int y = baseY + (area ? 32 : entry.getRegionY());
 
 		String place = Places.get(x, y, entry.getPlane());
+		if (place == null)
+		{
+			place = MapLabels.nearest(x, y, area ? LABEL_RADIUS_AREA : LABEL_RADIUS_TILE);
+		}
 		if (place == null)
 		{
 			place = AreaNames.get(entry.getRegionId());

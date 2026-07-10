@@ -71,7 +71,7 @@ Codes contain object names and locations, and are sanitized on import (malformed
 - Objects whose appearance changes with game state (morphing/multiloc objects) are matched on their base name and may not hide reliably.
 - Hides made inside an instance are tagged as such and apply only in instanced areas that use the same map template; they never affect the overworld.
 - A small set of raid-mechanic objects can't be hidden and are stripped from imports, per plugin hub rules.
-- Location labels come from static bundled data (factual OSRS geography); the broad-region part is coordinate-box approximate near borders, and unknown spots fall back to tile coordinates.
+- Location labels come from static bundled data — including the game's own world-map place names — all factual OSRS geography; the broad-region part is coordinate-box approximate near borders, and unknown spots fall back to tile coordinates.
 
 ## Support
 

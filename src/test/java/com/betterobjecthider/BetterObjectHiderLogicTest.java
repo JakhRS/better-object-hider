@@ -392,6 +392,44 @@ public class BetterObjectHiderLogicTest
 		assertNull(CoordBoxes.lookup(boxes, 31, 15));
 	}
 
+	// --- world map labels -----------------------------------------------------------------
+
+	@Test
+	public void mapLabelParseToleratesJunk()
+	{
+		assertNull(MapLabels.parseLine(null));
+		assertNull(MapLabels.parseLine(""));
+		assertNull(MapLabels.parseLine("# comment"));
+		assertNull(MapLabels.parseLine("1\t2\t3"));
+		assertNull(MapLabels.parseLine("a\t2\t3\tName"));
+		assertNull(MapLabels.parseLine("1\t2\t3\t "));
+		assertEquals("Name", MapLabels.parseLine("1\t2\t3\tName").name);
+	}
+
+	@Test
+	public void mapLabelNearestPicksClosestWithinRadius()
+	{
+		final List<MapLabels.Label> labels = List.of(
+			MapLabels.parseLine("100\t100\t0\tNear"),
+			MapLabels.parseLine("130\t100\t0\tFar"));
+		assertEquals("Near", MapLabels.nearest(labels, 105, 103, 24));
+		assertEquals("Far", MapLabels.nearest(labels, 126, 100, 24));
+		// Chebyshev distance: (100,100) -> (124,124) is 24, inside; 25 is out
+		assertEquals("Near", MapLabels.nearest(labels, 124, 124, 24));
+		assertNull(MapLabels.nearest(labels, 100, 150, 24));
+		assertNull(MapLabels.nearest(List.of(), 100, 100, 24));
+	}
+
+	@Test
+	public void mapLabelDataLoadsAndIsSelfConsistent()
+	{
+		// The generated file should be substantial and usable at its own coords
+		assertTrue("expected many labels, got " + MapLabels.labels().size(),
+			MapLabels.labels().size() > 500);
+		final MapLabels.Label first = MapLabels.labels().get(0);
+		assertEquals(first.name, MapLabels.nearest(first.x, first.y, 0));
+	}
+
 	// --- location labels ----------------------------------------------------------------------
 
 	@Test
@@ -418,6 +456,11 @@ public class BetterObjectHiderLogicTest
 			LocationLabel.describe(tileEntry("Chair", 7769, 10, 10, 0, true)));
 		assertEquals("All of Lumbridge (Misthalin)",
 			LocationLabel.describe(areaEntry("Tree", 12850, false)));
+		// Goblin Village sits in region 11830, which the region table only knows
+		// as "Asgarnia" — the world-map label layer supplies the real place.
+		// (World coords 2963,3502 → region 11830, regionX 19, regionY 46.)
+		assertEquals("Goblin Village (Asgarnia)",
+			LocationLabel.describe(tileEntry("Tent", 11830, 19, 46, 0, false)));
 	}
 
 	@Test
