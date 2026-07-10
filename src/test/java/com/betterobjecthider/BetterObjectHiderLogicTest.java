@@ -464,6 +464,26 @@ public class BetterObjectHiderLogicTest
 	}
 
 	@Test
+	public void locationLabelUsesDungeonNameAsUndergroundContext()
+	{
+		// Underground points have no province, so the context falls back to the
+		// region table. "Blue dragons" label at (2908,9807) → region 11673,
+		// regionX 28, regionY 15 — Taverley Dungeon.
+		assertEquals("Blue dragons (Taverley Dungeon)",
+			LocationLabel.describe(tileEntry("Rocks", 11673, 28, 15, 0, false)));
+	}
+
+	@Test
+	public void locationLabelNamesTheMaggotKingLair()
+	{
+		// Real user data: an instance-scoped AREA hide made in a pre-labels
+		// version of the plugin (template region 11645, off-map, unlabeled) —
+		// the curated places box must name it retroactively.
+		final HideEntry entry = areaEntry("Darkwood tree", 11645, true);
+		assertEquals("All of Maggot King's lair", LocationLabel.describe(entry));
+	}
+
+	@Test
 	public void locationLabelFallsBackToCoordinates()
 	{
 		assertEquals("Tile 69, 70", LocationLabel.describe(tileEntry("Tree", 257, 5, 6, 0, false)));

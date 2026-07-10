@@ -9,3 +9,5 @@
 3776	9856	3839	9919	The Nightmare
 # Castle Wars arena (region 9520) + lobby/bank (9776 — upstream data lumps it into Kandarin)
 2368	3072	2495	3135	Castle Wars
+# Maggot King's lair (Vampyrium) — instanced arena, template region 11645; not on the world map
+2880	8000	2943	8063	Maggot King's lair

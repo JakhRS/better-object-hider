@@ -45,6 +45,7 @@ public final class LocationLabel
 		final int x = baseX + (area ? 32 : entry.getRegionX());
 		final int y = baseY + (area ? 32 : entry.getRegionY());
 
+		final String regionName = AreaNames.get(entry.getRegionId());
 		String place = Places.get(x, y, entry.getPlane());
 		if (place == null)
 		{
@@ -52,9 +53,16 @@ public final class LocationLabel
 		}
 		if (place == null)
 		{
-			place = AreaNames.get(entry.getRegionId());
+			place = regionName;
 		}
-		final String combined = combine(place, Provinces.get(x, y));
+		// Context: the province on the surface; underground there is none, so fall
+		// back to the region table — "Blue dragons (Taverley Dungeon)"
+		String context = Provinces.get(x, y);
+		if (context == null)
+		{
+			context = regionName;
+		}
+		final String combined = combine(place, context);
 
 		if (area)
 		{
