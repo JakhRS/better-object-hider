@@ -132,6 +132,11 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private final JPanel revealBannerSlot = new JPanel(new BorderLayout());
 	// Survives rebuild(): expanded/collapsed per group name (default expanded)
 	private final Map<String, Boolean> expandedState = new HashMap<>();
+	// describe() is a pure function of the entry's (value-equal) fields but does
+	// a data-table scan; rebuild() runs per keystroke, so cache labels across
+	// rebuilds. Size-guarded rather than invalidated — stale entries are
+	// impossible, only unused ones accumulate.
+	private final Map<HideEntry, String> labelCache = new HashMap<>();
 
 	private JPanel highlightedHeader;
 
@@ -557,11 +562,15 @@ public class BetterObjectHiderPanel extends PluginPanel
 		final List<HideEntry> entries = new ArrayList<>(group.getEntries());
 		entries.sort(ENTRY_ORDER);
 
+		if (labelCache.size() > 4096)
+		{
+			labelCache.clear();
+		}
 		for (final HideEntry entry : entries)
 		{
 			// The location label doubles as the area: filter value, so searching
 			// matches exactly what the row displays
-			final String detail = LocationLabel.describe(entry);
+			final String detail = labelCache.computeIfAbsent(entry, LocationLabel::describe);
 			if (!filter.isEmpty() && !filter.matches(entry, groupName, detail))
 			{
 				continue;

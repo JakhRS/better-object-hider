@@ -47,13 +47,31 @@ public final class LocationLabel
 
 		final String regionName = AreaNames.get(entry.getRegionId());
 		String place = Places.get(x, y, entry.getPlane());
-		if (place == null)
+		if (area)
 		{
-			place = MapLabels.nearest(x, y, area ? LABEL_RADIUS_AREA : LABEL_RADIUS_TILE);
+			// An AREA hide covers the whole region, so the region's own name is
+			// the honest label; a point label (sampled at the centre, radius 32)
+			// is only a gap-filler — it can sit in an adjacent region and must
+			// never displace an exact region name.
+			if (place == null)
+			{
+				place = regionName;
+			}
+			if (place == null)
+			{
+				place = MapLabels.nearest(x, y, LABEL_RADIUS_AREA);
+			}
 		}
-		if (place == null)
+		else
 		{
-			place = regionName;
+			if (place == null)
+			{
+				place = MapLabels.nearest(x, y, LABEL_RADIUS_TILE);
+			}
+			if (place == null)
+			{
+				place = regionName;
+			}
 		}
 		// Context: the province on the surface; underground there is none, so fall
 		// back to the region table — "Blue dragons (Taverley Dungeon)"

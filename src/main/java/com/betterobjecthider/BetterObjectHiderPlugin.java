@@ -172,8 +172,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 
 	// The most recent in-game hide this session, so the panel can offer one-click
 	// undo (an accidental "Hide all in this area" shouldn't need panel archaeology).
-	// Guarded by synchronized(this); session-only, never persisted.
+	// The group is recorded too: undo must revert exactly that addition, never an
+	// equal entry in another group. Guarded by synchronized(this); session-only.
 	private HideEntry lastHide;
+	private String lastHideGroup;
 
 	private BetterObjectHiderPanel pluginPanel;
 	private NavigationButton navigationButton;
@@ -593,8 +595,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		maybeExpireActiveGroup();
 		synchronized (this)
 		{
-			activeGroup().getEntries().add(entry);
+			final HideGroup group = activeGroup();
+			group.getEntries().add(entry);
 			lastHide = entry;
+			lastHideGroup = group.getName();
 		}
 		touchActiveGroup();
 		saveToConfig();
@@ -609,30 +613,51 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 
 	/**
 	 * The panel's undo-row text for the most recent in-game hide, or null when
-	 * there is nothing to undo (no hide yet, already undone, or removed by hand).
+	 * there is nothing to undo (no hide yet, already undone, or the entry no
+	 * longer sits in the group it was added to). The label is built outside the
+	 * monitor — it does a data-table scan the client thread must not wait on.
 	 */
-	public synchronized String getUndoText()
-	{
-		if (lastHide == null || !anyGroupContains(lastHide))
-		{
-			return null;
-		}
-		return "\"" + lastHide.getObjectName() + "\" — " + LocationLabel.describe(lastHide);
-	}
-
-	/** Reverts the most recent in-game hide. */
-	public void undoLastHide()
+	public String getUndoText()
 	{
 		final HideEntry entry;
 		synchronized (this)
 		{
+			if (!lastHideValid())
+			{
+				return null;
+			}
 			entry = lastHide;
-			lastHide = null;
 		}
-		if (entry != null)
+		return "\"" + entry.getObjectName() + "\" — " + LocationLabel.describe(entry);
+	}
+
+	/** Reverts the most recent in-game hide — from the group it was added to only. */
+	public void undoLastHide()
+	{
+		final HideEntry entry;
+		final String group;
+		synchronized (this)
 		{
-			removeHideEverywhere(entry);
+			entry = lastHide;
+			group = lastHideGroup;
+			lastHide = null;
+			lastHideGroup = null;
 		}
+		if (entry != null && group != null)
+		{
+			removeEntry(group, entry);
+		}
+	}
+
+	/** Must be called inside synchronized(this). */
+	private boolean lastHideValid()
+	{
+		if (lastHide == null || lastHideGroup == null)
+		{
+			return false;
+		}
+		final HideGroup group = findGroup(groups, lastHideGroup);
+		return group != null && group.getEntries().contains(lastHide);
 	}
 
 	/** Panel reveal-eye toggle; the config change flows back through onConfigChanged. */
@@ -816,6 +841,10 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 			if (activeGroupName.equals(oldName))
 			{
 				activeGroupName = name;
+			}
+			if (oldName.equals(lastHideGroup))
+			{
+				lastHideGroup = name;
 			}
 		}
 		saveToConfig();
@@ -1046,9 +1075,19 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		return new ImportPreview(imported, null);
 	}
 
-	/** Adds a previewed group after the user confirmed the import. */
-	public ImportResult commitImport(HideGroup imported)
+	/**
+	 * Adds a previewed group after the user confirmed the import. Sanitization
+	 * runs again here so the guard is inseparable from the add — the argument
+	 * must never be trusted to have come through the preview path.
+	 */
+	public ImportResult commitImport(HideGroup group)
 	{
+		final HideGroup imported = sanitizeGroup(group, bannedNames);
+		if (imported == null || imported.getEntries().isEmpty()
+			|| imported.getEntries().size() > MAX_IMPORT_ENTRIES)
+		{
+			return new ImportResult(false, "The hide group could not be imported.");
+		}
 		final String name;
 		final int count = imported.getEntries().size();
 		synchronized (this)
@@ -1352,8 +1391,9 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	 * Packed render-match key in the object's world-location space: object id in
 	 * bits 34+, plane in bits 32-33, then x and y as 16-bit fields (world coords
 	 * top out at 16383, so components can never bleed into each other). A long
-	 * instead of a string keeps {@link #drawObject} allocation-free during zone
-	 * uploads on the maploader thread.
+	 * instead of a string spares {@link #drawObject} the string building of the
+	 * old "id:x:y:plane" keys during zone uploads on the maploader thread (the
+	 * Set lookup still boxes one Long per call — cheap, but not allocation-free).
 	 */
 	static long tileKey(int objectId, WorldPoint wp)
 	{

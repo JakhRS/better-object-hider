@@ -84,6 +84,11 @@ public final class EntryFilter
 		boolean test(HideEntry entry, String groupName, String areaName);
 	}
 
+	// A recognized prefix with an invalid value ("scope:tiles", "is:foo") must
+	// match nothing: silently dropping the term would show EVERY hide — the
+	// opposite of what the typo intended. The panel then reads "no matches".
+	private static final Term MATCH_NOTHING = (e, g, area) -> false;
+
 	private static Term parseTerm(String raw)
 	{
 		if (raw.isEmpty())
@@ -97,20 +102,27 @@ public final class EntryFilter
 			switch (raw.substring(0, colon))
 			{
 				case "area":
+				{
 					// GLOBAL hides apply everywhere, so any area term includes them
-					return (e, g, area) -> e.getScope() == HideScope.GLOBAL || matchesValue(value, area);
+					final ValueTest test = compileValue(value);
+					return (e, g, area) -> e.getScope() == HideScope.GLOBAL || test.test(area);
+				}
 				case "group":
-					return (e, g, area) -> matchesValue(value, g);
+				{
+					final ValueTest test = compileValue(value);
+					return (e, g, area) -> test.test(g);
+				}
 				case "scope":
 					final HideScope scope = scopeFor(value);
-					return scope == null ? null : (e, g, area) -> e.getScope() == scope;
+					return scope == null ? MATCH_NOTHING : (e, g, area) -> e.getScope() == scope;
 				case "is":
-					return "instance".equals(value) ? (e, g, area) -> e.isInstance() : null;
+					return "instance".equals(value) ? (e, g, area) -> e.isInstance() : MATCH_NOTHING;
 				default:
 					break; // unknown prefix: fall through to a plain name term
 			}
 		}
-		return (e, g, area) -> matchesValue(raw, e.getObjectName());
+		final ValueTest test = compileValue(raw);
+		return (e, g, area) -> test.test(e.getObjectName());
 	}
 
 	private static HideScope scopeFor(String value)
@@ -129,36 +141,53 @@ public final class EntryFilter
 		}
 	}
 
-	/**
-	 * Case-insensitive match of an already-lower-cased pattern against a value:
-	 * substring by default. A pattern containing {@code *} is a wildcard tested
-	 * against the whole value and against each word of it, so {@code tree*}
-	 * finds "Tree", "Trees" and "Darkwood Tree" alike.
-	 */
-	static boolean matchesValue(String pattern, String value)
+	private interface ValueTest
 	{
-		if (value == null)
-		{
-			return false;
-		}
-		final String lower = value.toLowerCase(Locale.ROOT);
+		boolean test(String value);
+	}
+
+	private static final Pattern WORD_SPLIT = Pattern.compile("\\s+");
+
+	/**
+	 * Compiles an already-lower-cased pattern once, at parse time — matching
+	 * runs per entry per keystroke and must not re-build regexes. Substring by
+	 * default; a pattern containing {@code *} is a wildcard tested against the
+	 * whole value and against each word of it, so {@code tree*} finds "Tree",
+	 * "Trees" and "Darkwood Tree" alike.
+	 */
+	private static ValueTest compileValue(String pattern)
+	{
 		if (pattern.indexOf('*') < 0)
 		{
-			return lower.contains(pattern);
+			return value -> value != null && value.toLowerCase(Locale.ROOT).contains(pattern);
 		}
-		final String regex = wildcardRegex(pattern);
-		if (lower.matches(regex))
+		final Pattern regex = Pattern.compile(wildcardRegex(pattern));
+		return value ->
 		{
-			return true;
-		}
-		for (final String word : lower.split("\\s+"))
-		{
-			if (word.matches(regex))
+			if (value == null)
+			{
+				return false;
+			}
+			final String lower = value.toLowerCase(Locale.ROOT);
+			if (regex.matcher(lower).matches())
 			{
 				return true;
 			}
-		}
-		return false;
+			for (final String word : WORD_SPLIT.split(lower))
+			{
+				if (regex.matcher(word).matches())
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+	}
+
+	/** Single-shot form of {@link #compileValue}; kept for unit tests. */
+	static boolean matchesValue(String pattern, String value)
+	{
+		return compileValue(pattern).test(value);
 	}
 
 	private static String wildcardRegex(String pattern)

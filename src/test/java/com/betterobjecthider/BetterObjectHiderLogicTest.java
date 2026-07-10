@@ -362,6 +362,18 @@ public class BetterObjectHiderLogicTest
 		assertFalse(EntryFilter.parse("foo:bar").matches(tileEntry("Tree", 12850, 1, 1, 0, false), "Default", null));
 	}
 
+	@Test
+	public void filterInvalidScopeOrIsValueMatchesNothing()
+	{
+		// A typo in a recognized prefix must not silently show every hide
+		final HideEntry entry = tileEntry("Tree", 12850, 1, 1, 0, false);
+		assertFalse(EntryFilter.parse("scope:tiles").isEmpty());
+		assertFalse(EntryFilter.parse("scope:tiles").matches(entry, "Default", null));
+		assertFalse(EntryFilter.parse("is:instanced").matches(entry, "Default", null));
+		// ...even when combined with a term that does match
+		assertFalse(EntryFilter.parse("tree scope:tiles").matches(entry, "Default", null));
+	}
+
 	// --- coordinate boxes -------------------------------------------------------------------
 
 	@Test
@@ -471,6 +483,16 @@ public class BetterObjectHiderLogicTest
 		// regionX 28, regionY 15 — Taverley Dungeon.
 		assertEquals("Blue dragons (Taverley Dungeon)",
 			LocationLabel.describe(tileEntry("Rocks", 11673, 28, 15, 0, false)));
+	}
+
+	@Test
+	public void areaLabelPrefersRegionNameOverPointLabels()
+	{
+		// Region 11673's centre is within 32 tiles of the "Blue dragons" point
+		// label, but an AREA hide covers the whole region — it must read as the
+		// region's own name, never a point label that happens to be near centre.
+		assertEquals("All of Taverley Dungeon",
+			LocationLabel.describe(areaEntry("Rocks", 11673, false)));
 	}
 
 	@Test
