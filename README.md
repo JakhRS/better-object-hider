@@ -38,6 +38,8 @@ options always appear.
 
 Open the **Better Object Hider** icon in the sidebar to manage everything:
 
+- The eye icon in the title row toggles **reveal mode** (hidden objects become visible so you can right-click and unhide them).
+- After you hide something in the world, an **Undo** row appears at the top of the panel for the most recent hide — one click brings it back. A game-chat message also confirms each hide (can be turned off in config).
 - **New group** creates a group. The orange group is *active* — new hides land there; click the circle icon on another group to switch.
 - The eye icon enables or disables a whole group's hides at once.
 - Click a group's name to collapse or expand it.
@@ -56,8 +58,8 @@ finds hidden trees in Kandarin.
 
 ### Unhiding
 
-- Panel: click the red ✕ next to a row.
-- In the world: enable **Reveal hidden objects** in config, shift+right-click the object, pick the Unhide option, then turn the toggle back off.
+- Panel: click the red ✕ next to a row, or **Undo** for the most recent hide.
+- In the world: click the eye icon in the panel's title row (or the "Reveal hidden objects" config toggle), shift+right-click the object, pick the Unhide option, then click the eye again.
 
 ### Sharing groups
 

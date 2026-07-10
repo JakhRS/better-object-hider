@@ -170,6 +170,11 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 	// Names of banned mechanic objects, resolved once on the client thread.
 	private final Set<String> bannedNames = ConcurrentHashMap.newKeySet();
 
+	// The most recent in-game hide this session, so the panel can offer one-click
+	// undo (an accidental "Hide all in this area" shouldn't need panel archaeology).
+	// Guarded by synchronized(this); session-only, never persisted.
+	private HideEntry lastHide;
+
 	private BetterObjectHiderPanel pluginPanel;
 	private NavigationButton navigationButton;
 
@@ -589,9 +594,51 @@ public class BetterObjectHiderPlugin extends Plugin implements RenderCallback
 		synchronized (this)
 		{
 			activeGroup().getEntries().add(entry);
+			lastHide = entry;
 		}
 		touchActiveGroup();
 		saveToConfig();
+		if (config.chatFeedback())
+		{
+			// Client thread (menu click), so addChatMessage is safe here
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
+				"Better Object Hider: Hidden \"" + entry.getObjectName() + "\" — "
+					+ LocationLabel.describe(entry) + ". Undo from the side panel.", null);
+		}
+	}
+
+	/**
+	 * The panel's undo-row text for the most recent in-game hide, or null when
+	 * there is nothing to undo (no hide yet, already undone, or removed by hand).
+	 */
+	public synchronized String getUndoText()
+	{
+		if (lastHide == null || !anyGroupContains(lastHide))
+		{
+			return null;
+		}
+		return "\"" + lastHide.getObjectName() + "\" — " + LocationLabel.describe(lastHide);
+	}
+
+	/** Reverts the most recent in-game hide. */
+	public void undoLastHide()
+	{
+		final HideEntry entry;
+		synchronized (this)
+		{
+			entry = lastHide;
+			lastHide = null;
+		}
+		if (entry != null)
+		{
+			removeHideEverywhere(entry);
+		}
+	}
+
+	/** Panel reveal-eye toggle; the config change flows back through onConfigChanged. */
+	public void toggleRevealAll()
+	{
+		configManager.setConfiguration(CONFIG_GROUP, "revealAll", !config.revealAll());
 	}
 
 	/** Reveal-mode / panel unhide: removes the entry from every group so it reappears. */

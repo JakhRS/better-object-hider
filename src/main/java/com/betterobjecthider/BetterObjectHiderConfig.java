@@ -51,6 +51,17 @@ public interface BetterObjectHiderConfig extends Config
 
 	@ConfigItem(
 		position = 3,
+		keyName = "chatFeedback",
+		name = "Confirm hides in chat",
+		description = "Print a game-chat confirmation whenever you hide an object"
+	)
+	default boolean chatFeedback()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		position = 4,
 		keyName = "showHelp",
 		name = "Show usage help",
 		description = "Show the short how-to box at the top of the side panel"
@@ -63,7 +74,7 @@ public interface BetterObjectHiderConfig extends Config
 	@Range(max = 10080)
 	@Units(Units.MINUTES)
 	@ConfigItem(
-		position = 4,
+		position = 5,
 		keyName = "activeGroupTimeoutMinutes",
 		name = "Active group timeout",
 		description = "If the active group hasn't been used for this long, new hides go back to the Default group "

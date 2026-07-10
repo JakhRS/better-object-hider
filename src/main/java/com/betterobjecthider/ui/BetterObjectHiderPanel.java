@@ -125,6 +125,8 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private final JPanel listPanel = new JPanel(new GridBagLayout());
 	private final PluginErrorPanel emptyPanel = new PluginErrorPanel();
 	private final IconTextField searchBar = new IconTextField();
+	// Stateful title-row toggle; icon/tooltip refreshed in rebuild()
+	private final JLabel revealToggle = new JLabel(EYE_CLOSED);
 	// Survives rebuild(): expanded/collapsed per group name (default expanded)
 	private final Map<String, Boolean> expandedState = new HashMap<>();
 
@@ -143,6 +145,17 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		final JPanel links = new JPanel(new GridLayout(1, 0, 8, 0));
 		links.setOpaque(false);
+		revealToggle.setHorizontalAlignment(JLabel.CENTER);
+		revealToggle.setBorder(new EmptyBorder(0, 4, 0, 4));
+		revealToggle.addMouseListener(new MouseAdapter()
+		{
+			@Override
+			public void mousePressed(MouseEvent e)
+			{
+				plugin.toggleRevealAll();
+			}
+		});
+		links.add(revealToggle);
 		links.add(iconLabel(CODE, CODE_HOVER, "Source code & issue tracker (GitHub)",
 			() -> LinkBrowser.browse(REPO_URL)));
 		links.add(iconLabel(HEART, HEART_HOVER, "Enjoying the plugin? Buy me a Bond (Ko-fi)",
@@ -217,6 +230,12 @@ public class BetterObjectHiderPanel extends PluginPanel
 		c.gridx = 0;
 		c.gridy = 0;
 
+		final boolean reveal = plugin.isRevealAll();
+		revealToggle.setIcon(reveal ? EYE_OPEN : EYE_CLOSED);
+		revealToggle.setToolTipText(reveal
+			? "Reveal mode is on — hidden objects are visible. Click to re-hide."
+			: "Reveal hidden objects so you can right-click them to unhide");
+
 		listPanel.removeAll();
 		highlightedHeader = null;
 
@@ -243,9 +262,18 @@ public class BetterObjectHiderPanel extends PluginPanel
 			c.gridy++;
 		}
 
-		if (plugin.isRevealAll())
+		if (reveal)
 		{
 			listPanel.add(buildRevealBanner(), c);
+			c.gridy++;
+			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
+			c.gridy++;
+		}
+
+		final String undoText = plugin.getUndoText();
+		if (undoText != null)
+		{
+			listPanel.add(buildUndoRow(undoText), c);
 			c.gridy++;
 			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
 			c.gridy++;
@@ -293,6 +321,28 @@ public class BetterObjectHiderPanel extends PluginPanel
 
 		revalidate();
 		repaint();
+	}
+
+	private JPanel buildUndoRow(String undoText)
+	{
+		final JPanel row = new JPanel(new BorderLayout(6, 0));
+		row.setBorder(new EmptyBorder(4, 8, 4, 4));
+		row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+
+		final JLabel label = new JLabel("Hidden " + undoText);
+		label.putClientProperty("html.disable", Boolean.TRUE);
+		label.setFont(FontManager.getRunescapeSmallFont());
+		label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		label.setToolTipText("The most recent hide this session");
+
+		final JButton undo = new JButton("Undo");
+		undo.setFont(FontManager.getRunescapeSmallFont());
+		undo.setToolTipText("Unhide it again");
+		undo.addActionListener(e -> plugin.undoLastHide());
+
+		row.add(label, BorderLayout.CENTER);
+		row.add(undo, BorderLayout.EAST);
+		return row;
 	}
 
 	private JPanel buildNoMatches()
@@ -353,7 +403,7 @@ public class BetterObjectHiderPanel extends PluginPanel
 		banner.setBackground(ColorScheme.DARKER_GRAY_COLOR);
 
 		final JLabel label = new JLabel("<html>Reveal mode is on — hidden objects are visible."
-			+ " Turn off \"Reveal hidden objects\" in the config to re-hide.</html>");
+			+ " Click the eye icon above to re-hide.</html>");
 		label.setFont(FontManager.getRunescapeSmallFont());
 		label.setForeground(ColorScheme.BRAND_ORANGE);
 		banner.add(label, BorderLayout.CENTER);
