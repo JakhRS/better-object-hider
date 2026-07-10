@@ -127,6 +127,9 @@ public class BetterObjectHiderPanel extends PluginPanel
 	private final IconTextField searchBar = new IconTextField();
 	// Stateful title-row toggle; icon/tooltip refreshed in rebuild()
 	private final JLabel revealToggle = new JLabel(EYE_CLOSED);
+	// Sits between the title row and the buttons; rebuild() fills it with the
+	// reveal banner while reveal mode is on, so the banner is the top item
+	private final JPanel revealBannerSlot = new JPanel(new BorderLayout());
 	// Survives rebuild(): expanded/collapsed per group name (default expanded)
 	private final Map<String, Boolean> expandedState = new HashMap<>();
 
@@ -205,11 +208,22 @@ public class BetterObjectHiderPanel extends PluginPanel
 			}
 		});
 
-		final JPanel northPanel = new JPanel(new BorderLayout(0, 8));
+		searchBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+
+		final JPanel northPanel = new JPanel();
+		northPanel.setLayout(new BoxLayout(northPanel, BoxLayout.Y_AXIS));
 		northPanel.setBorder(new EmptyBorder(1, 0, 10, 0));
-		northPanel.add(titleRow, BorderLayout.NORTH);
-		northPanel.add(buttons, BorderLayout.CENTER);
-		northPanel.add(searchBar, BorderLayout.SOUTH);
+		titleRow.setAlignmentX(LEFT_ALIGNMENT);
+		revealBannerSlot.setAlignmentX(LEFT_ALIGNMENT);
+		revealBannerSlot.setOpaque(false);
+		buttons.setAlignmentX(LEFT_ALIGNMENT);
+		searchBar.setAlignmentX(LEFT_ALIGNMENT);
+		northPanel.add(titleRow);
+		northPanel.add(Box.createRigidArea(new Dimension(0, 8)));
+		northPanel.add(revealBannerSlot);
+		northPanel.add(buttons);
+		northPanel.add(Box.createRigidArea(new Dimension(0, 8)));
+		northPanel.add(searchBar);
 
 		emptyPanel.setContent("No hidden objects",
 			"Shift+right-click a named object to hide it.");
@@ -235,6 +249,12 @@ public class BetterObjectHiderPanel extends PluginPanel
 		revealToggle.setToolTipText(reveal
 			? "Reveal mode is on — hidden objects are visible. Click to re-hide."
 			: "Reveal hidden objects so you can right-click them to unhide");
+		revealBannerSlot.removeAll();
+		if (reveal)
+		{
+			revealBannerSlot.add(buildRevealBanner(), BorderLayout.CENTER);
+		}
+		revealBannerSlot.setBorder(reveal ? new EmptyBorder(0, 0, 8, 0) : null);
 
 		listPanel.removeAll();
 		highlightedHeader = null;
@@ -257,14 +277,6 @@ public class BetterObjectHiderPanel extends PluginPanel
 		if (plugin.isShowHelp())
 		{
 			listPanel.add(buildHelpBox(), c);
-			c.gridy++;
-			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
-			c.gridy++;
-		}
-
-		if (reveal)
-		{
-			listPanel.add(buildRevealBanner(), c);
 			c.gridy++;
 			listPanel.add(Box.createRigidArea(new Dimension(0, 8)), c);
 			c.gridy++;
