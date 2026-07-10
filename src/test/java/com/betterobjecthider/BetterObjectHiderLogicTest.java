@@ -296,12 +296,17 @@ public class BetterObjectHiderLogicTest
 	}
 
 	@Test
-	public void filterWildcardMatchesWholeValue()
+	public void filterWildcardMatchesWholeValueOrAnyWord()
 	{
 		assertTrue(EntryFilter.matchesValue("bank*", "Bank booth"));
 		assertTrue(EntryFilter.matchesValue("*booth", "Bank booth"));
 		assertTrue(EntryFilter.matchesValue("b*th", "Bank booth"));
-		assertFalse(EntryFilter.matchesValue("booth*", "Bank booth"));
+		// Word-level: the pattern anchors to each word, not just the whole name
+		assertTrue(EntryFilter.matchesValue("booth*", "Bank booth"));
+		assertTrue(EntryFilter.matchesValue("tree*", "Darkwood Tree"));
+		assertTrue(EntryFilter.matchesValue("tree*", "Trees"));
+		// ...but still anchored: no word of "Darkwood Tree" starts with "wood"
+		assertFalse(EntryFilter.matchesValue("wood*", "Darkwood Tree"));
 		// Regex metacharacters in the term are literal
 		assertFalse(EntryFilter.matchesValue("b.*h", "Bank booth"));
 		assertFalse(EntryFilter.matchesValue("tree*", null));
@@ -402,9 +407,12 @@ public class BetterObjectHiderLogicTest
 	@Test
 	public void locationLabelDescribesKnownPlaces()
 	{
-		// Castle Wars region 9520: place from the region table, province from the box
+		// Castle Wars arena region 9520 and lobby region 9776 (which the upstream
+		// region table lumps into "Kandarin") — the curated places box wins
 		assertEquals("Castle Wars (Kandarin)",
 			LocationLabel.describe(tileEntry("Tree", 9520, 30, 30, 0, false)));
+		assertEquals("Castle Wars (Kandarin)",
+			LocationLabel.describe(tileEntry("Bank chest", 9776, 8, 18, 0, false)));
 		// Instanced template regions live off the overworld: place layer only
 		assertEquals("Player-owned House",
 			LocationLabel.describe(tileEntry("Chair", 7769, 10, 10, 0, true)));

@@ -14,7 +14,8 @@ import java.util.regex.Pattern;
 /**
  * A parsed side-panel search query. Terms are whitespace-separated and ALL must
  * match (AND). Matching is case-insensitive; a term containing {@code *} is a
- * wildcard pattern over the whole value, otherwise it is a substring test.
+ * wildcard pattern tested against the whole value and against each of its
+ * words, otherwise it is a substring test.
  *
  * <ul>
  *   <li>plain term — matches the object name (e.g. {@code tree}, {@code bank*}).</li>
@@ -130,8 +131,9 @@ public final class EntryFilter
 
 	/**
 	 * Case-insensitive match of an already-lower-cased pattern against a value:
-	 * substring by default, whole-value wildcard when the pattern contains
-	 * {@code *}.
+	 * substring by default. A pattern containing {@code *} is a wildcard tested
+	 * against the whole value and against each word of it, so {@code tree*}
+	 * finds "Tree", "Trees" and "Darkwood Tree" alike.
 	 */
 	static boolean matchesValue(String pattern, String value)
 	{
@@ -144,6 +146,23 @@ public final class EntryFilter
 		{
 			return lower.contains(pattern);
 		}
+		final String regex = wildcardRegex(pattern);
+		if (lower.matches(regex))
+		{
+			return true;
+		}
+		for (final String word : lower.split("\\s+"))
+		{
+			if (word.matches(regex))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static String wildcardRegex(String pattern)
+	{
 		final StringBuilder regex = new StringBuilder();
 		int start = 0;
 		for (int i = pattern.indexOf('*'); i >= 0; i = pattern.indexOf('*', start))
@@ -159,6 +178,6 @@ public final class EntryFilter
 		{
 			regex.append(Pattern.quote(pattern.substring(start)));
 		}
-		return lower.matches(regex.toString());
+		return regex.toString();
 	}
 }
